@@ -13,6 +13,12 @@ import (
 	"github.com/ferro-labs/ai-gateway/providers/core"
 )
 
+const (
+	testAuthHeader  = "Bearer test-key"
+	testCloudModel  = "gpt-oss:20b"
+	testCloudAPIKey = "test-key"
+)
+
 func TestNewValidationAndDefaults(t *testing.T) {
 	if _, err := New("", "", nil); err == nil {
 		t.Fatal("expected empty API key to be rejected")
@@ -66,52 +72,11 @@ func TestCompleteSendsAuthAndMapsResponse(t *testing.T) {
 		if r.URL.Path != "/api/chat" {
 			t.Errorf("path = %s, want /api/chat", r.URL.Path)
 		}
-		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
-			t.Errorf("Authorization = %q, want Bearer test-key", got)
-		}
-		if got := r.Header.Get("Content-Type"); !strings.Contains(got, "application/json") {
-			t.Errorf("Content-Type = %q, want application/json", got)
-		}
-
-		var body struct {
-			Model    string         `json:"model"`
-			Messages []core.Message `json:"messages"`
-			Stream   bool           `json:"stream"`
-			Options  *struct {
-				Temperature *float64 `json:"temperature"`
-				TopP        *float64 `json:"top_p"`
-				NumPredict  *int     `json:"num_predict"`
-			} `json:"options"`
-			Tools []core.Tool `json:"tools"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Fatalf("failed to decode request body: %v", err)
-		}
-		if body.Model != "gpt-oss:20b" {
-			t.Errorf("model = %q, want gpt-oss:20b", body.Model)
-		}
-		if body.Stream {
-			t.Error("stream = true, want false")
-		}
-		if len(body.Messages) != 1 || body.Messages[0].Role != "user" || body.Messages[0].Content != "hello" {
-			t.Errorf("messages = %#v, want user hello", body.Messages)
-		}
-		if body.Options == nil || body.Options.NumPredict == nil || *body.Options.NumPredict != 8 {
-			t.Fatalf("num_predict = %#v, want 8", body.Options)
-		}
-		if body.Options.Temperature == nil || *body.Options.Temperature != 0.25 {
-			t.Fatalf("temperature = %#v, want 0.25", body.Options.Temperature)
-		}
-		if body.Options.TopP == nil || *body.Options.TopP != 0.9 {
-			t.Fatalf("top_p = %#v, want 0.9", body.Options.TopP)
-		}
-		if len(body.Tools) != 1 || body.Tools[0].Function.Name != "lookup" {
-			t.Fatalf("tools = %#v, want lookup tool", body.Tools)
-		}
+		assertCompleteRequest(t, r)
 
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
-			"model":"gpt-oss:20b",
+			"model":"` + testCloudModel + `",
 			"created_at":"` + created + `",
 			"message":{"role":"assistant","content":"hi there"},
 			"done":true,
@@ -122,14 +87,14 @@ func TestCompleteSendsAuthAndMapsResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	p, err := New("test-key", server.URL, []string{"gpt-oss:20b"})
+	p, err := New(testCloudAPIKey, server.URL, []string{testCloudModel})
 	if err != nil {
 		t.Fatalf("New returned error: %v", err)
 	}
 
 	temp, topP, maxTokens, maxCompletionTokens := 0.25, 0.9, 99, 8
 	resp, err := p.Complete(context.Background(), core.Request{
-		Model: "gpt-oss:20b",
+		Model: testCloudModel,
 		Messages: []core.Message{
 			{Role: "user", Content: "hello"},
 		},
@@ -148,8 +113,8 @@ func TestCompleteSendsAuthAndMapsResponse(t *testing.T) {
 	if resp.Provider != Name {
 		t.Fatalf("provider = %q, want %q", resp.Provider, Name)
 	}
-	if resp.Model != "gpt-oss:20b" {
-		t.Fatalf("model = %q, want gpt-oss:20b", resp.Model)
+	if resp.Model != testCloudModel {
+		t.Fatalf("model = %q, want %s", resp.Model, testCloudModel)
 	}
 	if resp.Created != mustUnix(t, created) {
 		t.Fatalf("created = %d, want %d", resp.Created, mustUnix(t, created))
@@ -168,6 +133,53 @@ func TestCompleteSendsAuthAndMapsResponse(t *testing.T) {
 	}
 }
 
+func assertCompleteRequest(t *testing.T, r *http.Request) {
+	t.Helper()
+
+	if got := r.Header.Get("Authorization"); got != testAuthHeader {
+		t.Errorf("Authorization = %q, want %s", got, testAuthHeader)
+	}
+	if got := r.Header.Get("Content-Type"); !strings.Contains(got, "application/json") {
+		t.Errorf("Content-Type = %q, want application/json", got)
+	}
+
+	var body struct {
+		Model    string         `json:"model"`
+		Messages []core.Message `json:"messages"`
+		Stream   bool           `json:"stream"`
+		Options  *struct {
+			Temperature *float64 `json:"temperature"`
+			TopP        *float64 `json:"top_p"`
+			NumPredict  *int     `json:"num_predict"`
+		} `json:"options"`
+		Tools []core.Tool `json:"tools"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		t.Fatalf("failed to decode request body: %v", err)
+	}
+	if body.Model != testCloudModel {
+		t.Errorf("model = %q, want %s", body.Model, testCloudModel)
+	}
+	if body.Stream {
+		t.Error("stream = true, want false")
+	}
+	if len(body.Messages) != 1 || body.Messages[0].Role != "user" || body.Messages[0].Content != "hello" {
+		t.Errorf("messages = %#v, want user hello", body.Messages)
+	}
+	if body.Options == nil || body.Options.NumPredict == nil || *body.Options.NumPredict != 8 {
+		t.Fatalf("num_predict = %#v, want 8", body.Options)
+	}
+	if body.Options.Temperature == nil || *body.Options.Temperature != 0.25 {
+		t.Fatalf("temperature = %#v, want 0.25", body.Options.Temperature)
+	}
+	if body.Options.TopP == nil || *body.Options.TopP != 0.9 {
+		t.Fatalf("top_p = %#v, want 0.9", body.Options.TopP)
+	}
+	if len(body.Tools) != 1 || body.Tools[0].Function.Name != "lookup" {
+		t.Fatalf("tools = %#v, want lookup tool", body.Tools)
+	}
+}
+
 func TestCompleteNon200Error(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
@@ -175,12 +187,12 @@ func TestCompleteNon200Error(t *testing.T) {
 	}))
 	defer server.Close()
 
-	p, err := New("test-key", server.URL, []string{"gpt-oss:20b"})
+	p, err := New(testCloudAPIKey, server.URL, []string{testCloudModel})
 	if err != nil {
 		t.Fatalf("New returned error: %v", err)
 	}
 
-	_, err = p.Complete(context.Background(), core.Request{Model: "gpt-oss:20b"})
+	_, err = p.Complete(context.Background(), core.Request{Model: testCloudModel})
 	if err == nil {
 		t.Fatal("expected Complete to return an error")
 	}
@@ -194,8 +206,8 @@ func TestCompleteStreamParsesNDJSONAndFinalUsage(t *testing.T) {
 		if r.URL.Path != "/api/chat" {
 			t.Errorf("path = %s, want /api/chat", r.URL.Path)
 		}
-		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
-			t.Errorf("Authorization = %q, want Bearer test-key", got)
+		if got := r.Header.Get("Authorization"); got != testAuthHeader {
+			t.Errorf("Authorization = %q, want %s", got, testAuthHeader)
 		}
 
 		var body struct {
@@ -209,19 +221,19 @@ func TestCompleteStreamParsesNDJSONAndFinalUsage(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/x-ndjson")
-		_, _ = w.Write([]byte(`{"model":"gpt-oss:20b","created_at":"2025-01-02T03:04:05Z","message":{"role":"assistant","content":"hel"},"done":false}` + "\n"))
-		_, _ = w.Write([]byte(`{"model":"gpt-oss:20b","message":{"role":"assistant","content":"lo"},"done":false}` + "\n"))
-		_, _ = w.Write([]byte(`{"model":"gpt-oss:20b","done":true,"done_reason":"stop","prompt_eval_count":3,"eval_count":2}` + "\n"))
+		_, _ = w.Write([]byte(`{"model":"` + testCloudModel + `","created_at":"2025-01-02T03:04:05Z","message":{"role":"assistant","content":"hel"},"done":false}` + "\n"))
+		_, _ = w.Write([]byte(`{"model":"` + testCloudModel + `","message":{"role":"assistant","content":"lo"},"done":false}` + "\n"))
+		_, _ = w.Write([]byte(`{"model":"` + testCloudModel + `","done":true,"done_reason":"stop","prompt_eval_count":3,"eval_count":2}` + "\n"))
 	}))
 	defer server.Close()
 
-	p, err := New("test-key", server.URL, []string{"gpt-oss:20b"})
+	p, err := New(testCloudAPIKey, server.URL, []string{testCloudModel})
 	if err != nil {
 		t.Fatalf("New returned error: %v", err)
 	}
 
 	ch, err := p.CompleteStream(context.Background(), core.Request{
-		Model:    "gpt-oss:20b",
+		Model:    testCloudModel,
 		Messages: []core.Message{{Role: "user", Content: "hello"}},
 	})
 	if err != nil {

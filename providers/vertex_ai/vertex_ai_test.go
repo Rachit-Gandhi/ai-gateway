@@ -11,11 +11,13 @@ import (
 	"github.com/ferro-labs/ai-gateway/providers/core"
 )
 
+const testAPIKey = "test-key"
+
 func TestNewVertexAI_APIKeyMode(t *testing.T) {
 	p, err := New(Options{
 		ProjectID: "demo-project",
 		Region:    "us-central1",
-		APIKey:    "test-key",
+		APIKey:    testAPIKey,
 	})
 	if err != nil {
 		t.Fatalf("New() error: %v", err)
@@ -29,14 +31,14 @@ func TestNewVertexAI_APIKeyMode(t *testing.T) {
 }
 
 func TestNewVertexAI_RequiresProjectID(t *testing.T) {
-	_, err := New(Options{Region: "us-central1", APIKey: "test-key"})
+	_, err := New(Options{Region: "us-central1", APIKey: testAPIKey})
 	if err == nil {
 		t.Fatal("expected error for missing project_id")
 	}
 }
 
 func TestNewVertexAI_RequiresRegion(t *testing.T) {
-	_, err := New(Options{ProjectID: "demo-project", APIKey: "test-key"})
+	_, err := New(Options{ProjectID: "demo-project", APIKey: testAPIKey})
 	if err == nil {
 		t.Fatal("expected error for missing region")
 	}
@@ -64,11 +66,11 @@ func TestVertexAIProvider_AuthHeaders_APIKey(t *testing.T) {
 	p, _ := New(Options{
 		ProjectID: "demo-project",
 		Region:    "us-central1",
-		APIKey:    "test-key",
+		APIKey:    testAPIKey,
 	})
 	headers := p.AuthHeaders()
-	if headers["x-goog-api-key"] != "test-key" {
-		t.Errorf("x-goog-api-key = %q, want test-key", headers["x-goog-api-key"])
+	if headers["x-goog-api-key"] != testAPIKey {
+		t.Errorf("x-goog-api-key = %q, want %s", headers["x-goog-api-key"], testAPIKey)
 	}
 }
 
@@ -76,7 +78,7 @@ func TestVertexAIProvider_SupportedModels(t *testing.T) {
 	p, _ := New(Options{
 		ProjectID: "demo-project",
 		Region:    "us-central1",
-		APIKey:    "test-key",
+		APIKey:    testAPIKey,
 	})
 	models := p.SupportedModels()
 	found := map[string]bool{}
@@ -97,7 +99,7 @@ func TestVertexAIProvider_CompleteStream_Interface(_ *testing.T) {
 	p, _ := New(Options{
 		ProjectID: "demo-project",
 		Region:    "us-central1",
-		APIKey:    "test-key",
+		APIKey:    testAPIKey,
 	})
 	var _ core.StreamProvider = p
 }
@@ -106,7 +108,7 @@ func TestVertexAIProvider_Embed_Interface(_ *testing.T) {
 	p, _ := New(Options{
 		ProjectID: "demo-project",
 		Region:    "us-central1",
-		APIKey:    "test-key",
+		APIKey:    testAPIKey,
 	})
 	var _ core.EmbeddingProvider = p
 }
@@ -121,8 +123,8 @@ func TestVertexAIProvider_Embed_BatchSuccess_APIKey(t *testing.T) {
 		if r.URL.Path != wantPath {
 			t.Errorf("request path = %q, want %s", r.URL.Path, wantPath)
 		}
-		if got := r.Header.Get("x-goog-api-key"); got != "test-key" {
-			t.Errorf("x-goog-api-key = %q, want test-key", got)
+		if got := r.Header.Get("x-goog-api-key"); got != testAPIKey {
+			t.Errorf("x-goog-api-key = %q, want %s", got, testAPIKey)
 		}
 		var body struct {
 			Instances []struct {

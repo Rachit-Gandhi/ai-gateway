@@ -15,6 +15,8 @@ import (
 	"github.com/ferro-labs/ai-gateway/providers/core"
 )
 
+const testEmbeddingModel = "BAAI/bge-base-en-v1.5"
+
 func TestNewTogether(t *testing.T) {
 	p, err := New("test-key", "")
 	if err != nil {
@@ -142,16 +144,16 @@ func TestTogetherProvider_SupportedModels_Embeddings(t *testing.T) {
 	models := p.SupportedModels()
 	found := false
 	for _, m := range models {
-		if m == "BAAI/bge-base-en-v1.5" {
+		if m == testEmbeddingModel {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatalf("embedding model %q not found in SupportedModels()", "BAAI/bge-base-en-v1.5")
+		t.Fatalf("embedding model %q not found in SupportedModels()", testEmbeddingModel)
 	}
-	if !p.SupportsModel("BAAI/bge-base-en-v1.5") {
-		t.Fatalf("SupportsModel(%q) = false, want true", "BAAI/bge-base-en-v1.5")
+	if !p.SupportsModel(testEmbeddingModel) {
+		t.Fatalf("SupportsModel(%q) = false, want true", testEmbeddingModel)
 	}
 }
 
@@ -185,7 +187,7 @@ func TestTogetherProvider_Embed_InvalidInput(t *testing.T) {
 	for _, tc := range badInputs {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := p.Embed(context.Background(), core.EmbeddingRequest{
-				Model: "BAAI/bge-base-en-v1.5",
+				Model: testEmbeddingModel,
 				Input: tc.input,
 			})
 			if err == nil {
@@ -211,7 +213,7 @@ func TestTogetherProvider_Embed_UpstreamError(t *testing.T) {
 
 	p, _ := New("test-key", srv.URL)
 	_, err := p.Embed(context.Background(), core.EmbeddingRequest{
-		Model: "BAAI/bge-base-en-v1.5",
+		Model: testEmbeddingModel,
 		Input: "hello",
 	})
 	if err == nil {
@@ -243,20 +245,20 @@ func testTogetherEmbedSuccess(t *testing.T, input interface{}) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatalf("failed to decode request body: %v", err)
 		}
-		if got := body["model"]; got != "BAAI/bge-base-en-v1.5" {
-			t.Errorf("model = %v, want BAAI/bge-base-en-v1.5", got)
+		if got := body["model"]; got != testEmbeddingModel {
+			t.Errorf("model = %v, want %s", got, testEmbeddingModel)
 		}
 		assertTogetherEmbeddingInput(t, body["input"], input)
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"object":"list","data":[{"object":"embedding","embedding":[0.1,0.2],"index":0},{"object":"embedding","embedding":[0.3,0.4],"index":1}],"model":"BAAI/bge-base-en-v1.5","usage":{"prompt_tokens":3,"total_tokens":3}}`))
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"object":"embedding","embedding":[0.1,0.2],"index":0},{"object":"embedding","embedding":[0.3,0.4],"index":1}],"model":"` + testEmbeddingModel + `","usage":{"prompt_tokens":3,"total_tokens":3}}`))
 	}))
 	defer srv.Close()
 
 	p, _ := New("test-key", srv.URL)
 	resp, err := p.Embed(context.Background(), core.EmbeddingRequest{
-		Model: "BAAI/bge-base-en-v1.5",
+		Model: testEmbeddingModel,
 		Input: input,
 	})
 	if err != nil {
@@ -265,8 +267,8 @@ func testTogetherEmbedSuccess(t *testing.T, input interface{}) {
 	if resp.Object != "list" {
 		t.Errorf("Object = %q, want list", resp.Object)
 	}
-	if resp.Model != "BAAI/bge-base-en-v1.5" {
-		t.Errorf("Model = %q, want BAAI/bge-base-en-v1.5", resp.Model)
+	if resp.Model != testEmbeddingModel {
+		t.Errorf("Model = %q, want %s", resp.Model, testEmbeddingModel)
 	}
 	if len(resp.Data) != 2 {
 		t.Fatalf("Data length = %d, want 2", len(resp.Data))

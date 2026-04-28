@@ -52,6 +52,11 @@ type providerNameStabilityCase struct {
 }
 
 func providerNameStabilityCases() []providerNameStabilityCase {
+	cases := providerNameStabilityCoreCases()
+	return append(cases, providerNameStabilityExtensionCases()...)
+}
+
+func providerNameStabilityCoreCases() []providerNameStabilityCase {
 	return []providerNameStabilityCase{
 		{
 			wantName: NameAI21,
@@ -218,6 +223,11 @@ func providerNameStabilityCases() []providerNameStabilityCase {
 				return p
 			},
 		},
+	}
+}
+
+func providerNameStabilityExtensionCases() []providerNameStabilityCase {
+	return []providerNameStabilityCase{
 		{
 			wantName: NameMistral,
 			build: func(t *testing.T) Provider {
