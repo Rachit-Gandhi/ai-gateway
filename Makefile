@@ -6,7 +6,7 @@ LDFLAGS  := -s -w \
             -X github.com/ferro-labs/ai-gateway/internal/version.Commit=$(COMMIT) \
             -X github.com/ferro-labs/ai-gateway/internal/version.Date=$(DATE)
 
-.PHONY: build run test test-coverage test-integration bench fmt vet lint clean deps precommit all snapshot release-check release-dry-run
+.PHONY: build run test test-coverage test-integration test-integration-containers bench fmt vet lint clean deps precommit all snapshot release-check release-dry-run
 
 build:
 	@mkdir -p bin
@@ -28,6 +28,9 @@ test-coverage:
 
 test-integration:
 	go test -v -race -timeout 60s ./... -run Integration
+
+test-integration-containers:
+	go test -v -race -timeout 120s ./test/integration/...
 
 bench:
 	go test -v -bench=. -benchmem ./...

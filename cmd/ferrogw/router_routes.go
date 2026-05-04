@@ -12,7 +12,9 @@ import (
 
 	aigateway "github.com/ferro-labs/ai-gateway"
 	"github.com/ferro-labs/ai-gateway/internal/admin"
+	"github.com/ferro-labs/ai-gateway/internal/apierror"
 	"github.com/ferro-labs/ai-gateway/internal/requestlog"
+	"github.com/ferro-labs/ai-gateway/internal/sse"
 	"github.com/ferro-labs/ai-gateway/internal/version"
 	"github.com/ferro-labs/ai-gateway/providers"
 	webassets "github.com/ferro-labs/ai-gateway/web"
@@ -42,7 +44,7 @@ type pageData struct {
 func renderPage(w http.ResponseWriter, page, title string) {
 	data := pageData{ActivePage: page, PageTitle: title, Version: version.Short()}
 	if err := renderWebTemplate(w, page, data); err != nil {
-		writeOpenAIError(w, http.StatusInternalServerError, "failed to render dashboard", "server_error", "internal_error")
+		apierror.WriteOpenAI(w, http.StatusInternalServerError, "failed to render dashboard", "server_error", "internal_error")
 	}
 }
 
@@ -197,45 +199,45 @@ func chatCompletionsHandler(gw *aigateway.Gateway) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		req, err := decodeChatCompletionRequest(r.Body)
 		if err != nil {
-			writeOpenAIError(w, http.StatusBadRequest, err.Error(), "invalid_request_error", "invalid_request")
+			apierror.WriteOpenAI(w, http.StatusBadRequest, err.Error(), "invalid_request_error", "invalid_request")
 			return
 		}
 		if err := req.Validate(); err != nil {
-			writeOpenAIError(w, http.StatusBadRequest, err.Error(), "invalid_request_error", "invalid_request")
+			apierror.WriteOpenAI(w, http.StatusBadRequest, err.Error(), "invalid_request_error", "invalid_request")
 			return
 		}
 
 		// --- Streaming path ---
 		if req.Stream {
 			if _, ok := gw.FindByModel(req.Model); !ok {
-				writeOpenAIError(w, http.StatusBadRequest, "no provider supports model: "+req.Model, "invalid_request_error", "model_not_found")
+				apierror.WriteOpenAI(w, http.StatusBadRequest, "no provider supports model: "+req.Model, "invalid_request_error", "model_not_found")
 				return
 			}
 			if _, ok := gw.FindStreamingByModel(req.Model); !ok {
-				writeOpenAIError(w, http.StatusBadRequest, "provider does not support streaming", "invalid_request_error", "streaming_not_supported")
+				apierror.WriteOpenAI(w, http.StatusBadRequest, "provider does not support streaming", "invalid_request_error", "streaming_not_supported")
 				return
 			}
 
 			ch, err := gw.RouteStream(r.Context(), req)
 			if err != nil {
-				status, errType, code := routeErrorDetails(err)
-				writeOpenAIError(w, status, err.Error(), errType, code)
+				status, errType, code := apierror.RouteErrorDetails(err)
+				apierror.WriteOpenAI(w, status, err.Error(), errType, code)
 				return
 			}
-			writeSSE(r.Context(), w, ch)
+			sse.Write(r.Context(), w, ch)
 			return
 		}
 
 		// --- Non-streaming path ---
 		if _, ok := gw.FindByModel(req.Model); !ok {
-			writeOpenAIError(w, http.StatusBadRequest, "no provider supports model: "+req.Model, "invalid_request_error", "model_not_found")
+			apierror.WriteOpenAI(w, http.StatusBadRequest, "no provider supports model: "+req.Model, "invalid_request_error", "model_not_found")
 			return
 		}
 
 		resp, err := gw.Route(r.Context(), req)
 		if err != nil {
-			status, errType, code := routeErrorDetails(err)
-			writeOpenAIError(w, status, err.Error(), errType, code)
+			status, errType, code := apierror.RouteErrorDetails(err)
+			apierror.WriteOpenAI(w, status, err.Error(), errType, code)
 			return
 		}
 

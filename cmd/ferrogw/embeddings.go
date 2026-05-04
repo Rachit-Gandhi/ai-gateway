@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	aigateway "github.com/ferro-labs/ai-gateway"
+	"github.com/ferro-labs/ai-gateway/internal/apierror"
 	"github.com/ferro-labs/ai-gateway/providers"
 )
 
@@ -15,21 +16,21 @@ func embeddingsHandler(gw *aigateway.Gateway) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req providers.EmbeddingRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeOpenAIError(w, http.StatusBadRequest, "invalid request body: "+err.Error(), "invalid_request_error", "invalid_request")
+			apierror.WriteOpenAI(w, http.StatusBadRequest, "invalid request body: "+err.Error(), "invalid_request_error", "invalid_request")
 			return
 		}
 		if req.Model == "" {
-			writeOpenAIError(w, http.StatusBadRequest, "model is required", "invalid_request_error", "invalid_request")
+			apierror.WriteOpenAI(w, http.StatusBadRequest, "model is required", "invalid_request_error", "invalid_request")
 			return
 		}
 		if req.Input == nil {
-			writeOpenAIError(w, http.StatusBadRequest, "input is required", "invalid_request_error", "invalid_request")
+			apierror.WriteOpenAI(w, http.StatusBadRequest, "input is required", "invalid_request_error", "invalid_request")
 			return
 		}
 
 		resp, err := gw.Embed(r.Context(), req)
 		if err != nil {
-			writeOpenAIError(w, http.StatusInternalServerError, err.Error(), "server_error", "routing_error")
+			apierror.WriteOpenAI(w, http.StatusInternalServerError, err.Error(), "server_error", "routing_error")
 			return
 		}
 

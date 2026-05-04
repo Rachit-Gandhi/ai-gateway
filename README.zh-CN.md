@@ -8,7 +8,7 @@
   <img src="docs/logo.png" alt="Ferro Labs AI 网关" height="60" align="absmiddle" /> Ferro Labs AI 网关
 </h1>
 
-**高性能 Go 语言 AI 网关。通过单一 OpenAI 兼容 API 路由 29 个提供商的 LLM 请求。**
+**高性能 Go 语言 AI 网关。通过单一 OpenAI 兼容 API 路由 30+ 个提供商的 LLM 请求。**
 
 **一键部署**
 
@@ -23,9 +23,11 @@
 [![GitHub Stars](https://img.shields.io/github/stars/ferro-labs/ai-gateway?style=flat&color=yellow)](https://github.com/ferro-labs/ai-gateway/stargazers)
 [![CI](https://github.com/ferro-labs/ai-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/ferro-labs/ai-gateway/actions/workflows/ci.yml)
 [![Code Scanning](https://github.com/ferro-labs/ai-gateway/actions/workflows/code-scanning.yml/badge.svg)](https://github.com/ferro-labs/ai-gateway/actions/workflows/code-scanning.yml)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg?url=https%3A%2F%2Fdeepwiki.com%2Fferro-labs%2Fai-gateway)](https://deepwiki.com/ferro-labs/ai-gateway)
+[![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/ferro-labs)](https://artifacthub.io/packages/search?org=ferro-labs)
 [![Discord](https://img.shields.io/badge/Discord-加入我们-5865F2?logo=discord&logoColor=white)](https://discord.gg/yCAeYvJeDV)
 
-🔀 **29 个提供商，2,500+ 个模型 — 统一 API**<br/>
+🔀 **30 个提供商，2,500+ 个模型 — 统一 API**<br/>
 ⚡ **1,000 并发用户下达 13,925 RPS**<br/>
 📦 **单一二进制文件，零依赖，32 MB 基础内存**
 
@@ -133,7 +135,7 @@ curl http://localhost:8080/v1/chat/completions \
 |:-----------------|:------------|:--------|:-----------|:------------|
 | 开发语言         | Go          | Python  | Go         | Go/Lua      |
 | 单一二进制       | ✅          | ❌      | ✅         | ❌          |
-| 提供商数量       | 29          | 100+    | 20+        | 10+         |
+| 提供商数量       | 30          | 100+    | 20+        | 10+         |
 | MCP 支持         | ✅          | ❌      | ✅         | ❌          |
 | 响应缓存         | ✅          | ✅      | ✅         | ❌（付费）  |
 | 防护栏           | ✅          | ✅      | ❌         | ❌（付费）  |
@@ -192,11 +194,11 @@ make setup && make bench
 - 提供商故障转移，支持可配置的重试策略和状态码过滤
 - 每请求模型别名（`fast → gpt-4o-mini`，`smart → claude-3-5-sonnet`）
 
-### 🔌 提供商（29 个）
+### 🔌 提供商（30 个）
 
 | OpenAI 及兼容 | Anthropic 及 Google | 云端及企业 | 开源及推理 |
 |:---|:---|:---|:---|
-| OpenAI | Anthropic | AWS Bedrock | Ollama |
+| OpenAI | Anthropic | AWS Bedrock | Ollama, Ollama Cloud |
 | Azure OpenAI | Google Gemini | Azure Foundry | Hugging Face |
 | OpenRouter | Vertex AI | Databricks | Replicate |
 | DeepSeek | | Cloudflare Workers AI | Together AI |
@@ -459,6 +461,8 @@ volumes:
 
 ### Kubernetes（通过 Helm）
 
+[![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/ferro-labs)](https://artifacthub.io/packages/search?org=ferro-labs)
+
 ```bash
 helm repo add ferro-labs https://ferro-labs.github.io/helm-charts
 helm repo update
@@ -466,7 +470,7 @@ helm install ferro-gw ferro-labs/ai-gateway \
   --set env.OPENAI_API_KEY=sk-your-key
 ```
 
-Helm 图表：[github.com/ferro-labs/helm-charts](https://github.com/ferro-labs/helm-charts)
+Helm 图表：[github.com/ferro-labs/helm-charts](https://github.com/ferro-labs/helm-charts) | [ArtifactHub](https://artifacthub.io/packages/search?org=ferro-labs)
 
 ---
 
@@ -612,9 +616,56 @@ FerroCloud——Ferro Labs AI 网关的托管版本，支持多租户、分析�
 
 ---
 
-## OpenAI SDK 迁移
+## SDK
 
-只需更改 base URL，即可将现有 OpenAI SDK 客户端指向 Ferro Labs AI 网关。
+Ferro Labs AI 网关官方客户端库：
+
+| SDK | 安装 | 仓库 |
+|:----|:-----|:-----|
+| Python | `pip install ferrolabs` | [ferro-labs/ferrolabs-python-sdk](https://github.com/ferro-labs/ferrolabs-python-sdk) |
+| TypeScript | `npm install ferrolabs` | [ferro-labs/ferrolabs-typescript-sdk](https://github.com/ferro-labs/ferrolabs-typescript-sdk) |
+
+<details>
+<summary><strong>Python</strong></summary>
+
+```python
+from ferrolabs import FerroClient
+
+client = FerroClient(
+    base_url="http://localhost:8080/v1",
+    api_key="your-ferro-api-key",
+)
+
+response = client.chat.completions.create(
+    model="gpt-4o",
+    messages=[{"role": "user", "content": "Hello"}],
+)
+```
+
+</details>
+
+<details>
+<summary><strong>TypeScript</strong></summary>
+
+```typescript
+import { FerroClient } from "ferrolabs";
+
+const client = new FerroClient({
+  baseURL: "http://localhost:8080/v1",
+  apiKey: "your-ferro-api-key",
+});
+
+const response = await client.chat.completions.create({
+  model: "gpt-4o",
+  messages: [{ role: "user", content: "Hello" }],
+});
+```
+
+</details>
+
+### 兼容 OpenAI SDK
+
+您也可以直接使用标准 OpenAI SDK——只需更改 base URL：
 
 **Python：**
 

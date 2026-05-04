@@ -12,6 +12,7 @@ import (
 	"time"
 
 	aigateway "github.com/ferro-labs/ai-gateway"
+	"github.com/ferro-labs/ai-gateway/internal/bootstrap"
 	"github.com/ferro-labs/ai-gateway/internal/cli"
 	"github.com/ferro-labs/ai-gateway/internal/logging"
 	"github.com/ferro-labs/ai-gateway/internal/ratelimit"
@@ -91,13 +92,13 @@ func runServe() {
 	}
 
 	gw := buildGateway(cfg, registry)
-	cfgManager, configStoreBackend, err := createConfigManagerFromEnv(gw)
+	cfgManager, configStoreBackend, err := bootstrap.CreateConfigManagerFromEnv(gw)
 	if err != nil {
 		logging.Logger.Error("failed to initialize config store", "error", err)
 		os.Exit(1)
 	}
 
-	keyStore, keyStoreBackend, err := createKeyStoreFromEnv()
+	keyStore, keyStoreBackend, err := bootstrap.CreateKeyStoreFromEnv()
 	if err != nil {
 		logging.Logger.Error("failed to initialize API key store", "error", err)
 		os.Exit(1)
@@ -110,7 +111,7 @@ func runServe() {
 	}
 
 	rlStore := newRateLimitStore()
-	logReader, logMaintainer, logReaderBackend, err := createRequestLogReaderFromEnv()
+	logReader, logMaintainer, logReaderBackend, err := bootstrap.CreateRequestLogReaderFromEnv()
 	if err != nil {
 		logging.Logger.Error("failed to initialize request log reader", "error", err)
 		os.Exit(1)
@@ -374,14 +375,14 @@ func printStartupBanner(addr string, registry *providers.Registry, cfg *aigatewa
 
 	// Store warnings.
 	hasWarnings := false
-	if keyStoreBackend == backendMemory {
+	if keyStoreBackend == bootstrap.BackendMemory {
 		if !hasWarnings {
 			fmt.Fprintf(os.Stderr, "  Warnings\n")
 			hasWarnings = true
 		}
 		fmt.Fprintf(os.Stderr, "    %s[!] API key store: in-memory (keys lost on restart)%s\n", yellow, reset)
 	}
-	if configStoreBackend == backendMemory {
+	if configStoreBackend == bootstrap.BackendMemory {
 		if !hasWarnings {
 			fmt.Fprintf(os.Stderr, "  Warnings\n")
 			hasWarnings = true

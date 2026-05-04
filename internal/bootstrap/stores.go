@@ -1,4 +1,5 @@
-package main
+// Package bootstrap provides env-driven factory functions for persistence backends.
+package bootstrap
 
 import (
 	"fmt"
@@ -10,42 +11,45 @@ import (
 	"github.com/ferro-labs/ai-gateway/internal/requestlog"
 )
 
+// Backend name constants returned alongside created stores.
 const (
-	backendMemory      = "memory"
-	backendSQLite      = "sqlite"
-	backendPostgres    = "postgres"
+	BackendMemory      = "memory"
+	BackendSQLite      = "sqlite"
+	BackendPostgres    = "postgres"
 	backendPostgresSQL = "postgresql"
 )
 
-func createKeyStoreFromEnv() (admin.Store, string, error) {
+// CreateKeyStoreFromEnv builds an admin key store from API_KEY_STORE_BACKEND / API_KEY_STORE_DSN env vars.
+func CreateKeyStoreFromEnv() (admin.Store, string, error) {
 	backend := strings.ToLower(strings.TrimSpace(os.Getenv("API_KEY_STORE_BACKEND")))
 	if backend == "" {
-		backend = backendMemory
+		backend = BackendMemory
 	}
 
 	storeDSN := strings.TrimSpace(os.Getenv("API_KEY_STORE_DSN"))
 
 	switch backend {
-	case backendMemory, "in-memory", "inmemory":
-		return admin.NewKeyStore(), backendMemory, nil
-	case backendSQLite:
+	case BackendMemory, "in-memory", "inmemory":
+		return admin.NewKeyStore(), BackendMemory, nil
+	case BackendSQLite:
 		store, err := admin.NewSQLiteStore(storeDSN)
 		if err != nil {
 			return nil, "", err
 		}
-		return store, backendSQLite, nil
-	case backendPostgres, backendPostgresSQL:
+		return store, BackendSQLite, nil
+	case BackendPostgres, backendPostgresSQL:
 		store, err := admin.NewPostgresStore(storeDSN)
 		if err != nil {
 			return nil, "", err
 		}
-		return store, backendPostgres, nil
+		return store, BackendPostgres, nil
 	default:
 		return nil, "", fmt.Errorf("unsupported API key store backend %q", backend)
 	}
 }
 
-func createRequestLogReaderFromEnv() (requestlog.Reader, requestlog.Maintainer, string, error) {
+// CreateRequestLogReaderFromEnv builds a request log reader from REQUEST_LOG_STORE_BACKEND / REQUEST_LOG_STORE_DSN env vars.
+func CreateRequestLogReaderFromEnv() (requestlog.Reader, requestlog.Maintainer, string, error) {
 	backend := strings.ToLower(strings.TrimSpace(os.Getenv("REQUEST_LOG_STORE_BACKEND")))
 	if backend == "" {
 		return nil, nil, "disabled", nil
@@ -54,39 +58,40 @@ func createRequestLogReaderFromEnv() (requestlog.Reader, requestlog.Maintainer, 
 	dsn := strings.TrimSpace(os.Getenv("REQUEST_LOG_STORE_DSN"))
 
 	switch backend {
-	case backendSQLite:
+	case BackendSQLite:
 		reader, err := requestlog.NewSQLiteWriter(dsn)
 		if err != nil {
 			return nil, nil, "", err
 		}
-		return reader, reader, backendSQLite, nil
-	case backendPostgres, backendPostgresSQL:
+		return reader, reader, BackendSQLite, nil
+	case BackendPostgres, backendPostgresSQL:
 		reader, err := requestlog.NewPostgresWriter(dsn)
 		if err != nil {
 			return nil, nil, "", err
 		}
-		return reader, reader, backendPostgres, nil
+		return reader, reader, BackendPostgres, nil
 	default:
 		return nil, nil, "", fmt.Errorf("unsupported request log store backend %q", backend)
 	}
 }
 
-func createConfigManagerFromEnv(gw *aigateway.Gateway) (admin.ConfigManager, string, error) {
+// CreateConfigManagerFromEnv builds a config manager from CONFIG_STORE_BACKEND / CONFIG_STORE_DSN env vars.
+func CreateConfigManagerFromEnv(gw *aigateway.Gateway) (admin.ConfigManager, string, error) {
 	backend := strings.ToLower(strings.TrimSpace(os.Getenv("CONFIG_STORE_BACKEND")))
 	if backend == "" {
-		backend = backendMemory
+		backend = BackendMemory
 	}
 
 	dsn := strings.TrimSpace(os.Getenv("CONFIG_STORE_DSN"))
 
 	switch backend {
-	case backendMemory, "in-memory", "inmemory":
+	case BackendMemory, "in-memory", "inmemory":
 		manager, err := admin.NewGatewayConfigManager(gw, nil)
 		if err != nil {
 			return nil, "", err
 		}
-		return manager, backendMemory, nil
-	case backendSQLite:
+		return manager, BackendMemory, nil
+	case BackendSQLite:
 		store, err := admin.NewSQLiteConfigStore(dsn)
 		if err != nil {
 			return nil, "", err
@@ -96,8 +101,8 @@ func createConfigManagerFromEnv(gw *aigateway.Gateway) (admin.ConfigManager, str
 			_ = store.Close()
 			return nil, "", err
 		}
-		return manager, backendSQLite, nil
-	case backendPostgres, backendPostgresSQL:
+		return manager, BackendSQLite, nil
+	case BackendPostgres, backendPostgresSQL:
 		store, err := admin.NewPostgresConfigStore(dsn)
 		if err != nil {
 			return nil, "", err
@@ -107,7 +112,7 @@ func createConfigManagerFromEnv(gw *aigateway.Gateway) (admin.ConfigManager, str
 			_ = store.Close()
 			return nil, "", err
 		}
-		return manager, backendPostgres, nil
+		return manager, BackendPostgres, nil
 	default:
 		return nil, "", fmt.Errorf("unsupported config store backend %q", backend)
 	}

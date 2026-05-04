@@ -17,6 +17,27 @@ Status: **Shipped** (2026-03-24)
 - Migration guides from LiteLLM, Portkey, and direct OpenAI SDK usage
 - Helm chart support, Docker multi-arch images, GoReleaser packaging
 
+## v1.0.5 — Ollama Cloud & Embeddings
+
+Status: **Shipped** (2026-04-28)
+
+### What shipped
+
+- Ollama Cloud as the 30th provider with streaming and model discovery
+- Expanded embedding support across 9 additional providers
+- Embedding registry consistency tests
+
+## v1.0.6 — SDKs, Helm, & Replicate Streaming
+
+Status: **Shipped** (2026-05-04)
+
+### What shipped
+
+- **Official Python SDK** — [ferrolabs-python-sdk](https://github.com/ferro-labs/ferrolabs-python-sdk)
+- **Official TypeScript SDK** — [ferrolabs-typescript-sdk](https://github.com/ferro-labs/ferrolabs-typescript-sdk)
+- **Helm charts on ArtifactHub** — [ferro-labs on ArtifactHub](https://artifacthub.io/packages/search?org=ferro-labs)
+- Replicate streaming support (SSE-based `CompleteStream`)
+
 ## v1.1.0
 
 Status: Planning
@@ -35,7 +56,6 @@ Status: Planning
 
 ### Priorities
 
-- **SDK packages** — official Go, Python, and TypeScript client libraries
 - **Webhook notifications** — configurable alerts for budget limits, error spikes, circuit breaker events
 - **Plugin SDK** — external plugin loading for custom guardrails and transforms
 - **Enhanced A/B testing** — metrics collection and winner determination for variant experiments
@@ -43,6 +63,7 @@ Status: Planning
 ## Future
 
 - Continue expanding provider coverage based on community demand
+- Official Go client library
 - Deepen production deployment guidance (Kubernetes operators, Terraform modules)
 - Expand the [ai-gateway-examples](https://github.com/ferro-labs/ai-gateway-examples) repo
 - Strengthen benchmark reporting and cross-gateway comparisons

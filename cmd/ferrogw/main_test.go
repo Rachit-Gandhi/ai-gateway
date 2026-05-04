@@ -14,6 +14,9 @@ import (
 
 	aigateway "github.com/ferro-labs/ai-gateway"
 	"github.com/ferro-labs/ai-gateway/internal/admin"
+	"github.com/ferro-labs/ai-gateway/internal/apierror"
+	"github.com/ferro-labs/ai-gateway/internal/bootstrap"
+	"github.com/ferro-labs/ai-gateway/internal/sse"
 	"github.com/ferro-labs/ai-gateway/plugin"
 	"github.com/ferro-labs/ai-gateway/providers"
 )
@@ -423,7 +426,7 @@ func TestWriteSSE_StreamError(t *testing.T) {
 	close(ch)
 
 	w := httptest.NewRecorder()
-	writeSSE(context.Background(), w, ch)
+	sse.Write(context.Background(), w, ch)
 
 	body := w.Body.String()
 	if !strings.Contains(body, `"type":"stream_error"`) {
@@ -453,9 +456,9 @@ func TestCreateKeyStoreFromEnv_DefaultMemory(t *testing.T) {
 	t.Setenv("API_KEY_STORE_BACKEND", "")
 	t.Setenv("API_KEY_STORE_DSN", "")
 
-	store, backend, err := createKeyStoreFromEnv()
+	store, backend, err := bootstrap.CreateKeyStoreFromEnv()
 	if err != nil {
-		t.Fatalf("createKeyStoreFromEnv returned error: %v", err)
+		t.Fatalf("bootstrap.CreateKeyStoreFromEnv returned error: %v", err)
 	}
 	if backend != "memory" {
 		t.Fatalf("backend = %s, want memory", backend)
@@ -483,7 +486,7 @@ func BenchmarkWriteSSE(b *testing.B) {
 		close(ch)
 
 		w := httptest.NewRecorder()
-		writeSSE(context.Background(), w, ch)
+		sse.Write(context.Background(), w, ch)
 	}
 }
 
@@ -563,7 +566,7 @@ func BenchmarkWriteOpenAIError(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		w := httptest.NewRecorder()
-		writeOpenAIError(w, http.StatusBadRequest, "invalid request", "invalid_request_error", "invalid_request")
+		apierror.WriteOpenAI(w, http.StatusBadRequest, "invalid request", "invalid_request_error", "invalid_request")
 		_, _ = io.Copy(io.Discard, w.Result().Body)
 	}
 }
@@ -573,9 +576,9 @@ func TestCreateKeyStoreFromEnv_SQLite(t *testing.T) {
 	t.Setenv("API_KEY_STORE_BACKEND", "sqlite")
 	t.Setenv("API_KEY_STORE_DSN", dsn)
 
-	store, backend, err := createKeyStoreFromEnv()
+	store, backend, err := bootstrap.CreateKeyStoreFromEnv()
 	if err != nil {
-		t.Fatalf("createKeyStoreFromEnv returned error: %v", err)
+		t.Fatalf("bootstrap.CreateKeyStoreFromEnv returned error: %v", err)
 	}
 	if backend != "sqlite" {
 		t.Fatalf("backend = %s, want sqlite", backend)
@@ -594,7 +597,7 @@ func TestCreateKeyStoreFromEnv_UnknownBackend(t *testing.T) {
 	t.Setenv("API_KEY_STORE_BACKEND", "unknown")
 	t.Setenv("API_KEY_STORE_DSN", "")
 
-	if _, _, err := createKeyStoreFromEnv(); err == nil {
+	if _, _, err := bootstrap.CreateKeyStoreFromEnv(); err == nil {
 		t.Fatalf("expected error for unsupported backend")
 	}
 }
@@ -603,7 +606,7 @@ func TestCreateKeyStoreFromEnv_PostgresMissingDSN(t *testing.T) {
 	t.Setenv("API_KEY_STORE_BACKEND", "postgres")
 	t.Setenv("API_KEY_STORE_DSN", "")
 
-	if _, _, err := createKeyStoreFromEnv(); err == nil {
+	if _, _, err := bootstrap.CreateKeyStoreFromEnv(); err == nil {
 		t.Fatalf("expected error for missing postgres dsn")
 	}
 }
@@ -617,9 +620,9 @@ func TestCreateConfigManagerFromEnv_DefaultMemory(t *testing.T) {
 		Targets:  []aigateway.Target{{VirtualKey: "openai"}},
 	})
 
-	mgr, backend, err := createConfigManagerFromEnv(gw)
+	mgr, backend, err := bootstrap.CreateConfigManagerFromEnv(gw)
 	if err != nil {
-		t.Fatalf("createConfigManagerFromEnv returned error: %v", err)
+		t.Fatalf("bootstrap.CreateConfigManagerFromEnv returned error: %v", err)
 	}
 	if backend != "memory" {
 		t.Fatalf("backend = %s, want memory", backend)
@@ -647,9 +650,9 @@ func TestCreateConfigManagerFromEnv_SQLitePersistence(t *testing.T) {
 	}
 
 	gw1 := newTestGateway(t, initialCfg)
-	mgr1, backend, err := createConfigManagerFromEnv(gw1)
+	mgr1, backend, err := bootstrap.CreateConfigManagerFromEnv(gw1)
 	if err != nil {
-		t.Fatalf("createConfigManagerFromEnv returned error: %v", err)
+		t.Fatalf("bootstrap.CreateConfigManagerFromEnv returned error: %v", err)
 	}
 	if backend != "sqlite" {
 		t.Fatalf("backend = %s, want sqlite", backend)
@@ -659,9 +662,9 @@ func TestCreateConfigManagerFromEnv_SQLitePersistence(t *testing.T) {
 	}
 
 	gw2 := newTestGateway(t, initialCfg)
-	mgr2, _, err := createConfigManagerFromEnv(gw2)
+	mgr2, _, err := bootstrap.CreateConfigManagerFromEnv(gw2)
 	if err != nil {
-		t.Fatalf("createConfigManagerFromEnv (second) returned error: %v", err)
+		t.Fatalf("bootstrap.CreateConfigManagerFromEnv (second) returned error: %v", err)
 	}
 	loaded := mgr2.GetConfig()
 	if loaded.Strategy.Mode != aigateway.ModeFallback {
@@ -681,7 +684,7 @@ func TestCreateConfigManagerFromEnv_UnknownBackend(t *testing.T) {
 		Targets:  []aigateway.Target{{VirtualKey: "openai"}},
 	})
 
-	if _, _, err := createConfigManagerFromEnv(gw); err == nil {
+	if _, _, err := bootstrap.CreateConfigManagerFromEnv(gw); err == nil {
 		t.Fatalf("expected error for unsupported backend")
 	}
 }
@@ -695,7 +698,7 @@ func TestCreateConfigManagerFromEnv_PostgresMissingDSN(t *testing.T) {
 		Targets:  []aigateway.Target{{VirtualKey: "openai"}},
 	})
 
-	if _, _, err := createConfigManagerFromEnv(gw); err == nil {
+	if _, _, err := bootstrap.CreateConfigManagerFromEnv(gw); err == nil {
 		t.Fatalf("expected error for missing postgres dsn")
 	}
 }
@@ -736,7 +739,7 @@ func TestCloseResources_AggregatesCloserErrors(t *testing.T) {
 }
 
 func TestRouteErrorDetails_BeforeRequestRejection(t *testing.T) {
-	status, errType, code := routeErrorDetails(&plugin.RejectionError{Stage: plugin.StageBeforeRequest, Reason: "blocked"})
+	status, errType, code := apierror.RouteErrorDetails(&plugin.RejectionError{Stage: plugin.StageBeforeRequest, Reason: "blocked"})
 	if status != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", status, http.StatusBadRequest)
 	}
@@ -754,7 +757,7 @@ func TestRouteErrorDetails_RateLimitRejection_Returns429(t *testing.T) {
 		Stage:      plugin.StageBeforeRequest,
 		Reason:     "budget exceeded",
 	}
-	status, errType, code := routeErrorDetails(err)
+	status, errType, code := apierror.RouteErrorDetails(err)
 	if status != http.StatusTooManyRequests {
 		t.Fatalf("status = %d, want %d", status, http.StatusTooManyRequests)
 	}
@@ -767,7 +770,7 @@ func TestRouteErrorDetails_RateLimitRejection_Returns429(t *testing.T) {
 }
 
 func TestRouteErrorDetails_AfterRequestRejection(t *testing.T) {
-	status, errType, code := routeErrorDetails(&plugin.RejectionError{Stage: plugin.StageAfterRequest, Reason: "schema mismatch"})
+	status, errType, code := apierror.RouteErrorDetails(&plugin.RejectionError{Stage: plugin.StageAfterRequest, Reason: "schema mismatch"})
 	if status != http.StatusBadGateway {
 		t.Fatalf("status = %d, want %d", status, http.StatusBadGateway)
 	}
@@ -780,7 +783,7 @@ func TestRouteErrorDetails_AfterRequestRejection(t *testing.T) {
 }
 
 func TestRouteErrorDetails_UnknownStageRejection(t *testing.T) {
-	status, errType, code := routeErrorDetails(&plugin.RejectionError{Stage: plugin.Stage("custom_stage"), Reason: "custom"})
+	status, errType, code := apierror.RouteErrorDetails(&plugin.RejectionError{Stage: plugin.Stage("custom_stage"), Reason: "custom"})
 	if status != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want %d", status, http.StatusInternalServerError)
 	}
@@ -793,7 +796,7 @@ func TestRouteErrorDetails_UnknownStageRejection(t *testing.T) {
 }
 
 func TestRouteErrorDetails_NonRejectionError(t *testing.T) {
-	status, errType, code := routeErrorDetails(errors.New("boom"))
+	status, errType, code := apierror.RouteErrorDetails(errors.New("boom"))
 	if status != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want %d", status, http.StatusInternalServerError)
 	}

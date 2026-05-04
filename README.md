@@ -24,6 +24,7 @@
 [![CI](https://github.com/ferro-labs/ai-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/ferro-labs/ai-gateway/actions/workflows/ci.yml)
 [![Code Scanning](https://github.com/ferro-labs/ai-gateway/actions/workflows/code-scanning.yml/badge.svg)](https://github.com/ferro-labs/ai-gateway/actions/workflows/code-scanning.yml)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg?url=https%3A%2F%2Fdeepwiki.com%2Fferro-labs%2Fai-gateway)](https://deepwiki.com/ferro-labs/ai-gateway)
+[![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/ferro-labs)](https://artifacthub.io/packages/search?org=ferro-labs)
 [![Discord](https://img.shields.io/badge/Discord-Join%20Us-5865F2?logo=discord&logoColor=white)](https://discord.gg/yCAeYvJeDV)
 
 🔀 **30 providers, 2,500+ models — one API**<br/>
@@ -467,6 +468,8 @@ volumes:
 
 ### Kubernetes via Helm
 
+[![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/ferro-labs)](https://artifacthub.io/packages/search?org=ferro-labs)
+
 ```bash
 helm repo add ferro-labs https://ferro-labs.github.io/helm-charts
 helm repo update
@@ -474,7 +477,7 @@ helm install ferro-gw ferro-labs/ai-gateway \
   --set env.OPENAI_API_KEY=sk-your-key
 ```
 
-Helm charts: [github.com/ferro-labs/helm-charts](https://github.com/ferro-labs/helm-charts)
+Helm charts: [github.com/ferro-labs/helm-charts](https://github.com/ferro-labs/helm-charts) | [ArtifactHub](https://artifacthub.io/packages/search?org=ferro-labs)
 
 ---
 
@@ -620,9 +623,56 @@ FerroCloud — the managed version of Ferro Labs AI Gateway with multi-tenancy, 
 
 ---
 
-## OpenAI SDK Migration
+## SDKs
 
-Point existing OpenAI SDK clients to Ferro Labs AI Gateway by changing only the base URL.
+Official client libraries for the Ferro Labs AI Gateway:
+
+| SDK | Install | Repository |
+|:----|:--------|:-----------|
+| Python | `pip install ferrolabs` | [ferro-labs/ferrolabs-python-sdk](https://github.com/ferro-labs/ferrolabs-python-sdk) |
+| TypeScript | `npm install ferrolabs` | [ferro-labs/ferrolabs-typescript-sdk](https://github.com/ferro-labs/ferrolabs-typescript-sdk) |
+
+<details>
+<summary><strong>Python</strong></summary>
+
+```python
+from ferrolabs import FerroClient
+
+client = FerroClient(
+    base_url="http://localhost:8080/v1",
+    api_key="your-ferro-api-key",
+)
+
+response = client.chat.completions.create(
+    model="gpt-4o",
+    messages=[{"role": "user", "content": "Hello"}],
+)
+```
+
+</details>
+
+<details>
+<summary><strong>TypeScript</strong></summary>
+
+```typescript
+import { FerroClient } from "ferrolabs";
+
+const client = new FerroClient({
+  baseURL: "http://localhost:8080/v1",
+  apiKey: "your-ferro-api-key",
+});
+
+const response = await client.chat.completions.create({
+  model: "gpt-4o",
+  messages: [{ role: "user", content: "Hello" }],
+});
+```
+
+</details>
+
+### OpenAI SDK Compatible
+
+You can also use the standard OpenAI SDK directly — just change the base URL:
 
 **Python:**
 

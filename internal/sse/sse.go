@@ -1,4 +1,5 @@
-package main
+// Package sse provides Server-Sent Events streaming for OpenAI-compatible responses.
+package sse
 
 import (
 	"bufio"
@@ -13,23 +14,30 @@ import (
 )
 
 var (
-	sseWriteDeadline = 15 * time.Second
-	sseIdleTimeout   = 2 * time.Minute
+	writeDeadline = 15 * time.Second
+	idleTimeout   = 2 * time.Minute
 )
 
-// writeSSE streams SSE chunks from ch to the response writer.
-func writeSSE(ctx context.Context, w http.ResponseWriter, ch <-chan providers.StreamChunk) {
+// SetIdleTimeoutForTest overrides the idle timeout for testing and returns a restore function.
+func SetIdleTimeoutForTest(d time.Duration) func() {
+	prev := idleTimeout
+	idleTimeout = d
+	return func() { idleTimeout = prev }
+}
+
+// Write streams SSE chunks from ch to the response writer.
+func Write(ctx context.Context, w http.ResponseWriter, ch <-chan providers.StreamChunk) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
 	controller := http.NewResponseController(w)
-	_ = clearSSEWriteDeadline(controller)
+	_ = clearWriteDeadline(controller)
 
 	bw := bufio.NewWriterSize(w, 4096)
 	enc := json.NewEncoder(bw)
 	now := time.Now().Unix()
-	idleTimer := time.NewTimer(sseIdleTimeout)
+	idleTimer := time.NewTimer(idleTimeout)
 	defer idleTimer.Stop()
 
 	for {
@@ -38,9 +46,9 @@ func writeSSE(ctx context.Context, w http.ResponseWriter, ch <-chan providers.St
 			logging.FromContext(ctx).Debug("stream response canceled", "error", ctx.Err())
 			return
 		case <-idleTimer.C:
-			logging.FromContext(ctx).Warn("stream response timed out waiting for next chunk", "idle_timeout_ms", sseIdleTimeout.Milliseconds())
-			_ = writeAndFlushSSE(ctx, controller, bw, func() error {
-				return writeSSEEvent(bw, enc, map[string]any{
+			logging.FromContext(ctx).Warn("stream response timed out waiting for next chunk", "idle_timeout_ms", idleTimeout.Milliseconds())
+			_ = writeAndFlush(ctx, controller, bw, func() error {
+				return writeEvent(bw, enc, map[string]any{
 					"error": map[string]string{
 						"message": "stream timed out waiting for next chunk",
 						"type":    "timeout_error",
@@ -51,7 +59,7 @@ func writeSSE(ctx context.Context, w http.ResponseWriter, ch <-chan providers.St
 			return
 		case chunk, ok := <-ch:
 			if !ok {
-				_ = writeAndFlushSSE(ctx, controller, bw, func() error {
+				_ = writeAndFlush(ctx, controller, bw, func() error {
 					_, err := bw.WriteString("data: [DONE]\n\n")
 					return err
 				})
@@ -59,8 +67,8 @@ func writeSSE(ctx context.Context, w http.ResponseWriter, ch <-chan providers.St
 			}
 
 			if chunk.Error != nil {
-				_ = writeAndFlushSSE(ctx, controller, bw, func() error {
-					return writeSSEEvent(bw, enc, map[string]any{
+				_ = writeAndFlush(ctx, controller, bw, func() error {
+					return writeEvent(bw, enc, map[string]any{
 						"error": map[string]string{
 							"message": chunk.Error.Error(),
 							"type":    "stream_error",
@@ -82,10 +90,10 @@ func writeSSE(ctx context.Context, w http.ResponseWriter, ch <-chan providers.St
 				default:
 				}
 			}
-			idleTimer.Reset(sseIdleTimeout)
+			idleTimer.Reset(idleTimeout)
 
-			if err := writeAndFlushSSE(ctx, controller, bw, func() error {
-				return writeSSEEvent(bw, enc, chunk)
+			if err := writeAndFlush(ctx, controller, bw, func() error {
+				return writeEvent(bw, enc, chunk)
 			}); err != nil {
 				if !errors.Is(err, context.Canceled) {
 					logging.FromContext(ctx).Debug("stream response write failed", "error", err)
@@ -96,12 +104,12 @@ func writeSSE(ctx context.Context, w http.ResponseWriter, ch <-chan providers.St
 	}
 }
 
-func writeAndFlushSSE(ctx context.Context, controller *http.ResponseController, bw *bufio.Writer, writeFn func() error) error {
-	if err := setSSEWriteDeadline(controller, time.Now().Add(sseWriteDeadline)); err != nil {
+func writeAndFlush(ctx context.Context, controller *http.ResponseController, bw *bufio.Writer, writeFn func() error) error {
+	if err := setWriteDeadline(controller, time.Now().Add(writeDeadline)); err != nil {
 		return err
 	}
 	defer func() {
-		_ = clearSSEWriteDeadline(controller)
+		_ = clearWriteDeadline(controller)
 	}()
 
 	select {
@@ -116,10 +124,10 @@ func writeAndFlushSSE(ctx context.Context, controller *http.ResponseController, 
 	if err := bw.Flush(); err != nil {
 		return err
 	}
-	return flushSSE(controller)
+	return flush(controller)
 }
 
-func writeSSEEvent(bw *bufio.Writer, enc *json.Encoder, payload any) error {
+func writeEvent(bw *bufio.Writer, enc *json.Encoder, payload any) error {
 	if _, err := bw.WriteString("data: "); err != nil {
 		return err
 	}
@@ -132,20 +140,20 @@ func writeSSEEvent(bw *bufio.Writer, enc *json.Encoder, payload any) error {
 	return nil
 }
 
-func flushSSE(controller *http.ResponseController) error {
+func flush(controller *http.ResponseController) error {
 	if err := controller.Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
 		return err
 	}
 	return nil
 }
 
-func setSSEWriteDeadline(controller *http.ResponseController, deadline time.Time) error {
+func setWriteDeadline(controller *http.ResponseController, deadline time.Time) error {
 	if err := controller.SetWriteDeadline(deadline); err != nil && !errors.Is(err, http.ErrNotSupported) {
 		return err
 	}
 	return nil
 }
 
-func clearSSEWriteDeadline(controller *http.ResponseController) error {
-	return setSSEWriteDeadline(controller, time.Time{})
+func clearWriteDeadline(controller *http.ResponseController) error {
+	return setWriteDeadline(controller, time.Time{})
 }

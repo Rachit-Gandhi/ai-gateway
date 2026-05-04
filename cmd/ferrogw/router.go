@@ -6,11 +6,12 @@ import (
 	aigateway "github.com/ferro-labs/ai-gateway"
 	"github.com/ferro-labs/ai-gateway/internal/admin"
 	"github.com/ferro-labs/ai-gateway/internal/logging"
+	"github.com/ferro-labs/ai-gateway/internal/middleware"
 	"github.com/ferro-labs/ai-gateway/internal/ratelimit"
 	"github.com/ferro-labs/ai-gateway/internal/requestlog"
 	"github.com/ferro-labs/ai-gateway/providers"
 	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
+	chimw "github.com/go-chi/chi/v5/middleware"
 )
 
 // newRouter builds the HTTP router.
@@ -31,9 +32,9 @@ func newRouter(
 
 	// Core middleware stack.
 	r.Use(logging.Middleware) // inject trace ID + X-Request-ID header
-	r.Use(middleware.Recoverer)
-	r.Use(middleware.RealIP)
-	r.Use(corsMiddleware(corsOrigins...))
+	r.Use(chimw.Recoverer)
+	r.Use(chimw.RealIP)
+	r.Use(middleware.CORS(corsOrigins...))
 
 	// Optional per-IP rate limiting middleware.
 	if rlStore != nil {

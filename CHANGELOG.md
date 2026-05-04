@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.0.6] — 2026-05-04
+
+Feature release adding official Python and TypeScript SDKs, Helm chart distribution via ArtifactHub, and Replicate streaming support.
+
+### Added
+
+- **Official TypeScript SDK** ([ferro-labs/ferrolabs-typescript-sdk](https://github.com/ferro-labs/ferrolabs-typescript-sdk)): First-party TypeScript/JavaScript client library for the Ferro Labs AI Gateway — supports chat, streaming, embeddings, and image generation across 30+ providers.
+- **Official Python SDK** ([ferro-labs/ferrolabs-python-sdk](https://github.com/ferro-labs/ferrolabs-python-sdk)): First-party Python client library for the Ferro Labs AI Gateway — works with any LLM or framework.
+- **Helm charts on ArtifactHub** ([ferro-labs on ArtifactHub](https://artifacthub.io/packages/search?org=ferro-labs)): Ferro Labs Helm charts are now discoverable and installable via ArtifactHub, the standard Kubernetes package registry.
+- **Replicate streaming** ([#108](https://github.com/ferro-labs/ai-gateway/pull/108), relates to [#46](https://github.com/ferro-labs/ai-gateway/issues/46)): The Replicate provider now implements `core.StreamProvider`. Streaming requests send `stream: true` to the Replicate prediction API, follow the returned stream URL, and parse Replicate SSE events (`output`, `done`, `error`) into the gateway's normalized `StreamChunk` format. Includes mock SSE test coverage.
+- **Postgres integration tests**: 15 integration tests in `test/integration/` using testcontainers-go to spin up a real Postgres 16 container. Covers key store CRUD, config store persistence, request log write/list/paginate/delete, and bootstrap factory functions. Runs in CI after unit tests pass.
+
+### Changed
+
+- **README**: Added SDK links, ArtifactHub badge, and updated provider/SDK documentation for both English and Chinese READMEs.
+- **Internal refactor**: Extracted CORS middleware, SSE streaming, error helpers, and store factories from `cmd/ferrogw/` into `internal/middleware`, `internal/sse`, `internal/apierror`, and `internal/bootstrap` with full test coverage — no public API changes.
+
+---
+
 ## [1.0.5] — 2026-04-28
 
 Feature release adding first-class Ollama Cloud support and broader embedding coverage while keeping the gateway's public API OpenAI-compatible for end users.

@@ -1,4 +1,4 @@
-package main
+package sse
 
 import (
 	"bufio"
@@ -12,7 +12,7 @@ import (
 	"github.com/ferro-labs/ai-gateway/providers"
 )
 
-func TestWriteSSE_WritesDoneSentinel(t *testing.T) {
+func TestWrite_WritesDoneSentinel(t *testing.T) {
 	ch := make(chan providers.StreamChunk, 1)
 	ch <- providers.StreamChunk{
 		ID:    "stream-1",
@@ -25,14 +25,14 @@ func TestWriteSSE_WritesDoneSentinel(t *testing.T) {
 	close(ch)
 
 	w := httptest.NewRecorder()
-	writeSSE(context.Background(), w, ch)
+	Write(context.Background(), w, ch)
 
 	if !strings.HasSuffix(w.Body.String(), "data: [DONE]\n\n") {
 		t.Fatalf("body should end with [DONE], got: %s", w.Body.String())
 	}
 }
 
-func TestWriteSSE_StopsWhenContextCanceled(t *testing.T) {
+func TestWrite_StopsWhenContextCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -48,24 +48,24 @@ func TestWriteSSE_StopsWhenContextCanceled(t *testing.T) {
 	close(ch)
 
 	w := httptest.NewRecorder()
-	writeSSE(ctx, w, ch)
+	Write(ctx, w, ch)
 
 	if w.Body.Len() != 0 {
 		t.Fatalf("expected canceled stream to write nothing, got: %s", w.Body.String())
 	}
 }
 
-func TestWriteAndFlushSSE_SetsAndClearsDeadline(t *testing.T) {
+func TestWriteAndFlush_SetsAndClearsDeadline(t *testing.T) {
 	rw := newDeadlineRecorder()
 	controller := http.NewResponseController(rw)
-	bw := newTestBufferedWriter(rw)
+	bw := bufio.NewWriterSize(rw, 4096)
 
-	err := writeAndFlushSSE(context.Background(), controller, bw, func() error {
+	err := writeAndFlush(context.Background(), controller, bw, func() error {
 		_, writeErr := bw.WriteString("data: {}\n\n")
 		return writeErr
 	})
 	if err != nil {
-		t.Fatalf("writeAndFlushSSE returned error: %v", err)
+		t.Fatalf("writeAndFlush returned error: %v", err)
 	}
 	if len(rw.deadlines) < 2 {
 		t.Fatalf("expected set and clear deadlines, got %d entries", len(rw.deadlines))
@@ -81,17 +81,14 @@ func TestWriteAndFlushSSE_SetsAndClearsDeadline(t *testing.T) {
 	}
 }
 
-func TestWriteSSE_TimesOutIdleStream(t *testing.T) {
-	prevIdleTimeout := sseIdleTimeout
-	sseIdleTimeout = 10 * time.Millisecond
-	defer func() {
-		sseIdleTimeout = prevIdleTimeout
-	}()
+func TestWrite_TimesOutIdleStream(t *testing.T) {
+	restore := SetIdleTimeoutForTest(10 * time.Millisecond)
+	defer restore()
 
 	ch := make(chan providers.StreamChunk)
 	w := httptest.NewRecorder()
 
-	writeSSE(context.Background(), w, ch)
+	Write(context.Background(), w, ch)
 
 	body := w.Body.String()
 	if !strings.Contains(body, `"code":"stream_timeout"`) {
@@ -102,12 +99,9 @@ func TestWriteSSE_TimesOutIdleStream(t *testing.T) {
 	}
 }
 
-func TestWriteSSE_ResetsIdleTimeoutAfterChunk(t *testing.T) {
-	prevIdleTimeout := sseIdleTimeout
-	sseIdleTimeout = 25 * time.Millisecond
-	defer func() {
-		sseIdleTimeout = prevIdleTimeout
-	}()
+func TestWrite_ResetsIdleTimeoutAfterChunk(t *testing.T) {
+	restore := SetIdleTimeoutForTest(25 * time.Millisecond)
+	defer restore()
 
 	ch := make(chan providers.StreamChunk, 2)
 	ch <- providers.StreamChunk{
@@ -125,7 +119,7 @@ func TestWriteSSE_ResetsIdleTimeoutAfterChunk(t *testing.T) {
 	}()
 
 	w := httptest.NewRecorder()
-	writeSSE(context.Background(), w, ch)
+	Write(context.Background(), w, ch)
 
 	body := w.Body.String()
 	if strings.Contains(body, `"code":"stream_timeout"`) {
@@ -134,10 +128,6 @@ func TestWriteSSE_ResetsIdleTimeoutAfterChunk(t *testing.T) {
 	if !strings.HasSuffix(body, "data: [DONE]\n\n") {
 		t.Fatalf("body should end with [DONE], got: %s", body)
 	}
-}
-
-func newTestBufferedWriter(rw http.ResponseWriter) *bufio.Writer {
-	return bufio.NewWriterSize(rw, 4096)
 }
 
 type deadlineRecorder struct {

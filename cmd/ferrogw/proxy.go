@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 
+	"github.com/ferro-labs/ai-gateway/internal/apierror"
 	"github.com/ferro-labs/ai-gateway/internal/httpclient"
 	"github.com/ferro-labs/ai-gateway/providers"
 )
@@ -30,7 +31,7 @@ func proxyHandler(registry *providers.Registry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		p, ok := resolveProvider(r, registry)
 		if !ok {
-			writeOpenAIError(w, http.StatusBadRequest,
+			apierror.WriteOpenAI(w, http.StatusBadRequest,
 				`no provider resolved; set the X-Provider header (e.g. "X-Provider: openai") or include a "model" field in the request body`,
 				"invalid_request_error",
 				"provider_not_resolved",
@@ -40,7 +41,7 @@ func proxyHandler(registry *providers.Registry) http.HandlerFunc {
 
 		pp, canProxy := p.(providers.ProxiableProvider)
 		if !canProxy {
-			writeOpenAIError(w, http.StatusNotImplemented,
+			apierror.WriteOpenAI(w, http.StatusNotImplemented,
 				"provider "+p.Name()+" does not support proxy pass-through",
 				"invalid_request_error",
 				"proxy_not_supported",
@@ -50,7 +51,7 @@ func proxyHandler(registry *providers.Registry) http.HandlerFunc {
 
 		target, err := url.Parse(pp.BaseURL())
 		if err != nil {
-			writeOpenAIError(w, http.StatusInternalServerError, "invalid provider base URL: "+err.Error(), "server_error", "internal_error")
+			apierror.WriteOpenAI(w, http.StatusInternalServerError, "invalid provider base URL: "+err.Error(), "server_error", "internal_error")
 			return
 		}
 

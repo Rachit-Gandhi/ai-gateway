@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/ferro-labs/ai-gateway/internal/apierror"
 	"github.com/ferro-labs/ai-gateway/internal/httpclient"
 	"github.com/ferro-labs/ai-gateway/providers"
 )
@@ -48,23 +49,23 @@ func completionsHandler(registry *providers.Registry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
-			writeOpenAIError(w, http.StatusBadRequest, "failed to read request body", "invalid_request_error", "invalid_request")
+			apierror.WriteOpenAI(w, http.StatusBadRequest, "failed to read request body", "invalid_request_error", "invalid_request")
 			return
 		}
 
 		var legacyReq LegacyCompletionRequest
 		if err := json.Unmarshal(body, &legacyReq); err != nil {
-			writeOpenAIError(w, http.StatusBadRequest, "invalid request body: "+err.Error(), "invalid_request_error", "invalid_request")
+			apierror.WriteOpenAI(w, http.StatusBadRequest, "invalid request body: "+err.Error(), "invalid_request_error", "invalid_request")
 			return
 		}
 		if legacyReq.Model == "" {
-			writeOpenAIError(w, http.StatusBadRequest, "model is required", "invalid_request_error", "invalid_request")
+			apierror.WriteOpenAI(w, http.StatusBadRequest, "model is required", "invalid_request_error", "invalid_request")
 			return
 		}
 
 		p, ok := registry.FindByModel(legacyReq.Model)
 		if !ok {
-			writeOpenAIError(w, http.StatusBadRequest, "no provider supports model: "+legacyReq.Model, "invalid_request_error", "model_not_found")
+			apierror.WriteOpenAI(w, http.StatusBadRequest, "no provider supports model: "+legacyReq.Model, "invalid_request_error", "model_not_found")
 			return
 		}
 
@@ -72,12 +73,12 @@ func completionsHandler(registry *providers.Registry) http.HandlerFunc {
 		if pp, canProxy := p.(providers.ProxiableProvider); canProxy {
 			target, err := completionsEndpointURL(pp.BaseURL())
 			if err != nil {
-				writeOpenAIError(w, http.StatusInternalServerError, err.Error(), "server_error", "internal_error")
+				apierror.WriteOpenAI(w, http.StatusInternalServerError, err.Error(), "server_error", "internal_error")
 				return
 			}
 			outReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, target, bytes.NewReader(body))
 			if err != nil {
-				writeOpenAIError(w, http.StatusInternalServerError, "failed to create upstream request: "+err.Error(), "server_error", "internal_error")
+				apierror.WriteOpenAI(w, http.StatusInternalServerError, "failed to create upstream request: "+err.Error(), "server_error", "internal_error")
 				return
 			}
 			outReq.Header.Set("Content-Type", "application/json")
@@ -94,7 +95,7 @@ func completionsHandler(registry *providers.Registry) http.HandlerFunc {
 			}
 			resp, err := client.Do(outReq)
 			if err != nil {
-				writeOpenAIError(w, http.StatusBadGateway, "upstream request failed: "+err.Error(), "server_error", "upstream_error")
+				apierror.WriteOpenAI(w, http.StatusBadGateway, "upstream request failed: "+err.Error(), "server_error", "upstream_error")
 				return
 			}
 			defer func() { _ = resp.Body.Close() }()
@@ -113,7 +114,7 @@ func completionsHandler(registry *providers.Registry) http.HandlerFunc {
 
 		// --- Path 2: chat-completion shim ---
 		if legacyReq.Stream {
-			writeOpenAIError(w,
+			apierror.WriteOpenAI(w,
 				http.StatusBadRequest,
 				"streaming is not supported for this provider on /v1/completions",
 				"invalid_request_error",
@@ -140,7 +141,7 @@ func completionsHandler(registry *providers.Registry) http.HandlerFunc {
 
 		chatResp, err := p.Complete(r.Context(), chatReq)
 		if err != nil {
-			writeOpenAIError(w, http.StatusInternalServerError, err.Error(), "server_error", "provider_error")
+			apierror.WriteOpenAI(w, http.StatusInternalServerError, err.Error(), "server_error", "provider_error")
 			return
 		}
 

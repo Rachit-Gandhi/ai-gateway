@@ -1,14 +1,15 @@
-package main
+// Package middleware provides HTTP middleware for the gateway server.
+package middleware
 
 import (
-	"log/slog"
 	"net/http"
 	"strings"
+
+	"github.com/ferro-labs/ai-gateway/internal/logging"
 )
 
-// corsMiddleware returns middleware that sets CORS headers.
-// When no origins are configured, it defaults to "*" and logs a security warning.
-func corsMiddleware(allowedOrigins ...string) func(http.Handler) http.Handler {
+// CORS returns middleware that sets CORS headers for the given allowed origins.
+func CORS(allowedOrigins ...string) func(http.Handler) http.Handler {
 	allowAny := len(allowedOrigins) == 0
 	allowed := make(map[string]struct{}, len(allowedOrigins))
 	for _, value := range allowedOrigins {
@@ -21,7 +22,7 @@ func corsMiddleware(allowedOrigins ...string) func(http.Handler) http.Handler {
 
 	if allowAny || len(allowed) == 0 {
 		allowAny = true
-		slog.Warn("CORS configured with wildcard '*' -- all origins allowed. Set CORS_ORIGINS for production use.")
+		logging.Logger.Warn("CORS configured with wildcard '*' -- all origins allowed. Set CORS_ORIGINS for production use.")
 	}
 
 	return func(next http.Handler) http.Handler {

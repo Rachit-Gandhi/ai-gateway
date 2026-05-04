@@ -1,8 +1,6 @@
 package main
 
 import (
-	"encoding/json"
-	"errors"
 	"fmt"
 	"html/template"
 	"io/fs"
@@ -11,14 +9,13 @@ import (
 	"os"
 	"strings"
 
+	"github.com/ferro-labs/ai-gateway/internal/apierror"
 	"github.com/ferro-labs/ai-gateway/internal/metrics"
 	"github.com/ferro-labs/ai-gateway/internal/ratelimit"
-	"github.com/ferro-labs/ai-gateway/plugin"
 	webassets "github.com/ferro-labs/ai-gateway/web"
 	"github.com/go-chi/chi/v5"
 )
 
-// pageTemplates caches parsed templates per page name (parsed once at startup).
 var pageTemplates = make(map[string]*template.Template)
 
 func init() {
@@ -38,7 +35,7 @@ func init() {
 	}
 }
 
-func renderWebTemplate(w http.ResponseWriter, pageName string, data interface{}) error {
+func renderWebTemplate(w http.ResponseWriter, pageName string, data any) error {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	tmpl, ok := pageTemplates[pageName]
 	if !ok {
@@ -73,7 +70,6 @@ func pprofEnabled() bool {
 	return v == "1" || v == "true" || v == "yes"
 }
 
-// rateLimitMiddleware rejects requests that exceed the per-IP token-bucket limit.
 func rateLimitMiddleware(store *ratelimit.Store) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -84,7 +80,7 @@ func rateLimitMiddleware(store *ratelimit.Store) func(http.Handler) http.Handler
 			}
 			if !store.Allow(ip) {
 				metrics.RateLimitRejections.WithLabelValues("ip").Inc()
-				writeOpenAIError(w, http.StatusTooManyRequests,
+				apierror.WriteOpenAI(w, http.StatusTooManyRequests,
 					"rate limit exceeded", "rate_limit_error", "rate_limit_exceeded")
 				return
 			}
@@ -93,47 +89,10 @@ func rateLimitMiddleware(store *ratelimit.Store) func(http.Handler) http.Handler
 	}
 }
 
-// writeOpenAIError writes a unified OpenAI-compatible JSON error response.
-func writeOpenAIError(w http.ResponseWriter, status int, message, errType, code string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"error": map[string]string{
-			"message": message,
-			"type":    errType,
-			"code":    code,
-		},
-	})
-}
-
-func routeErrorDetails(err error) (status int, errType, code string) {
-	status = http.StatusInternalServerError
-	errType = "server_error"
-	code = "routing_error"
-
-	var rejection *plugin.RejectionError
-	if errors.As(err, &rejection) {
-		switch rejection.Stage {
-		case plugin.StageBeforeRequest:
-			// Rate-limit and budget plugins signal throttling — return 429.
-			if rejection.PluginType == plugin.TypeRateLimit {
-				return http.StatusTooManyRequests, "rate_limit_error", "rate_limit_exceeded"
-			}
-			return http.StatusBadRequest, "invalid_request_error", "request_rejected"
-		case plugin.StageAfterRequest:
-			return http.StatusBadGateway, "upstream_error", "response_rejected"
-		default:
-			return http.StatusInternalServerError, "server_error", "request_rejected"
-		}
-	}
-
-	return status, errType, code
-}
-
 func serveLogo(w http.ResponseWriter) {
 	data, err := fs.ReadFile(webassets.Assets, "logo.png")
 	if err != nil {
-		writeOpenAIError(w, http.StatusNotFound, "logo not found", "not_found_error", "resource_not_found")
+		apierror.WriteOpenAI(w, http.StatusNotFound, "logo not found", "not_found_error", "resource_not_found")
 		return
 	}
 	w.Header().Set("Content-Type", "image/png")
