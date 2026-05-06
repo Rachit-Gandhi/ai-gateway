@@ -18,7 +18,13 @@ import (
 // Name is the canonical provider identifier.
 const Name = "replicate"
 
-const defaultBaseURL = "https://api.replicate.com/v1"
+const (
+	defaultBaseURL = "https://api.replicate.com/v1"
+
+	statusFailed   = "failed"
+	statusCanceled = "canceled"
+	eventMessage   = "message"
+)
 
 // Provider implements the Replicate API client.
 // It supports text generation models via chat completion and image generation
@@ -401,7 +407,7 @@ func (p *Provider) submitPrediction(ctx context.Context, url string, body io.Rea
 	if err := json.NewDecoder(httpResp.Body).Decode(&pred); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal prediction: %w", err)
 	}
-	if pred.Status == "failed" || pred.Status == "canceled" {
+	if pred.Status == statusFailed || pred.Status == statusCanceled {
 		return nil, fmt.Errorf("replicate prediction %s: %s", pred.Status, pred.Error)
 	}
 	return &pred, nil
@@ -414,10 +420,10 @@ func (p *Provider) readStream(ctx context.Context, body io.ReadCloser, ch chan<-
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 
-	event := "message"
+	event := eventMessage
 	var data strings.Builder
 	dispatch := func() bool {
-		if data.Len() == 0 && event == "message" {
+		if data.Len() == 0 && event == eventMessage {
 			return true
 		}
 		payload := data.String()
@@ -471,7 +477,7 @@ func (p *Provider) readStream(ctx context.Context, body io.ReadCloser, ch chan<-
 			if !dispatch() {
 				return
 			}
-			event = "message"
+			event = eventMessage
 			data.Reset()
 			continue
 		}
@@ -529,7 +535,7 @@ func (p *Provider) submitAndPoll(ctx context.Context, url string, body io.Reader
 	if pred.Status == "succeeded" {
 		return &pred, nil
 	}
-	if pred.Status == "failed" || pred.Status == "canceled" {
+	if pred.Status == statusFailed || pred.Status == statusCanceled {
 		return nil, fmt.Errorf("replicate prediction %s: %s", pred.Status, pred.Error)
 	}
 
@@ -567,7 +573,7 @@ func (p *Provider) submitAndPoll(ctx context.Context, url string, body io.Reader
 			switch pred.Status {
 			case "succeeded":
 				return &pred, nil
-			case "failed", "canceled":
+			case statusFailed, statusCanceled:
 				return nil, fmt.Errorf("replicate prediction %s: %s", pred.Status, pred.Error)
 			}
 		}

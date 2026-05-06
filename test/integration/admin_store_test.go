@@ -13,7 +13,7 @@ func TestPostgresStore_CRUD(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new postgres store: %v", err)
 	}
-	t.Cleanup(func() { truncateTable(t, "api_keys") })
+	t.Cleanup(func() { truncateTable(t, "api_keys"); _ = store.Close() })
 
 	created, err := store.Create("integration-key", []string{admin.ScopeAdmin}, nil)
 	if err != nil {
@@ -52,7 +52,7 @@ func TestPostgresStore_ValidateAndUsage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new postgres store: %v", err)
 	}
-	t.Cleanup(func() { truncateTable(t, "api_keys") })
+	t.Cleanup(func() { truncateTable(t, "api_keys"); _ = store.Close() })
 
 	created, err := store.Create("validate-key", []string{admin.ScopeAdmin}, nil)
 	if err != nil {
@@ -76,7 +76,7 @@ func TestPostgresStore_Expiration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new postgres store: %v", err)
 	}
-	t.Cleanup(func() { truncateTable(t, "api_keys") })
+	t.Cleanup(func() { truncateTable(t, "api_keys"); _ = store.Close() })
 
 	expired := time.Now().Add(-2 * time.Minute)
 	created, err := store.Create("expired-key", []string{admin.ScopeAdmin}, &expired)
@@ -100,7 +100,7 @@ func TestPostgresStore_RevokeAndRotate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new postgres store: %v", err)
 	}
-	t.Cleanup(func() { truncateTable(t, "api_keys") })
+	t.Cleanup(func() { truncateTable(t, "api_keys"); _ = store.Close() })
 
 	created, err := store.Create("rotate-key", []string{admin.ScopeAdmin}, nil)
 	if err != nil {
@@ -134,7 +134,7 @@ func TestPostgresStore_ListMasked(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new postgres store: %v", err)
 	}
-	t.Cleanup(func() { truncateTable(t, "api_keys") })
+	t.Cleanup(func() { truncateTable(t, "api_keys"); _ = store.Close() })
 
 	for i := range 3 {
 		name := "list-key-" + string(rune('a'+i))

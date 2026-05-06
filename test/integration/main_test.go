@@ -21,6 +21,10 @@ func TestMain(m *testing.M) {
 
 	pg, err := testutil.StartPostgres()
 	if err != nil {
+		if os.Getenv("CI") != "" {
+			fmt.Printf("FAIL: integration tests require Postgres: %v\n", err)
+			os.Exit(1)
+		}
 		fmt.Printf("skipping integration tests: %v\n", err)
 		os.Exit(0)
 	}

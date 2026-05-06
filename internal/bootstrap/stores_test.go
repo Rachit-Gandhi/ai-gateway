@@ -2,6 +2,7 @@ package bootstrap
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	aigateway "github.com/ferro-labs/ai-gateway"
@@ -155,6 +156,9 @@ func TestCreateConfigManagerFromEnv_PostgresqlAlias(t *testing.T) {
 	_, _, err := CreateConfigManagerFromEnv(gw)
 	if err == nil {
 		t.Skip("postgres not available, but alias was recognized")
+	}
+	if strings.Contains(err.Error(), "unsupported") {
+		t.Fatalf("postgresql alias was not recognized: %v", err)
 	}
 }
 

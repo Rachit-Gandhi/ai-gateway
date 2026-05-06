@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [1.0.6] — 2026-05-04
+## [1.0.6] — 2026-05-06
 
 Feature release adding official Python and TypeScript SDKs, Helm chart distribution via ArtifactHub, and Replicate streaming support.
 
