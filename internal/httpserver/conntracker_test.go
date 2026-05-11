@@ -1,4 +1,4 @@
-package main
+package httpserver
 
 import (
 	"context"
@@ -12,8 +12,8 @@ import (
 	dto "github.com/prometheus/client_model/go"
 )
 
-func TestServerConnTracker_TracksConnectionStates(t *testing.T) {
-	tracker := newServerConnTracker()
+func TestConnTracker_TracksConnectionStates(t *testing.T) {
+	tracker := newConnTracker()
 	conn := testConn{
 		local:  testAddr("127.0.0.1:8080"),
 		remote: testAddr("203.0.113.5:1234"),
@@ -46,14 +46,14 @@ func TestServerConnTracker_TracksConnectionStates(t *testing.T) {
 	}
 }
 
-func TestServerConnTracker_StoresConnMetadataInContext(t *testing.T) {
-	tracker := newServerConnTracker()
+func TestConnTracker_StoresConnMetadataInContext(t *testing.T) {
+	tracker := newConnTracker()
 	ctx := tracker.ConnContext(context.Background(), testConn{
 		local:  testAddr("127.0.0.1:8080"),
 		remote: testAddr("203.0.113.6:4567"),
 	})
 
-	meta, ok := connMetadataFromContext(ctx)
+	meta, ok := ConnMetadataFromContext(ctx)
 	if !ok {
 		t.Fatal("expected connection metadata in context")
 	}

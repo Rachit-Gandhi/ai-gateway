@@ -1,4 +1,4 @@
-package main
+package handler
 
 import (
 	"encoding/json"
@@ -9,10 +9,10 @@ import (
 	"github.com/ferro-labs/ai-gateway/providers"
 )
 
-// embeddingsHandler handles POST /v1/embeddings.
+// Embeddings handles POST /v1/embeddings.
 // It routes embedding requests to the first registered EmbeddingProvider that
 // supports the requested model.
-func embeddingsHandler(gw *aigateway.Gateway) http.HandlerFunc {
+func Embeddings(gw *aigateway.Gateway) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req providers.EmbeddingRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

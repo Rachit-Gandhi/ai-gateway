@@ -1,5 +1,5 @@
-// Package main provides the HTTP handlers for legacy OpenAI completions endpoint.
-package main
+// Package handler provides the HTTP handlers for legacy OpenAI completions endpoint.
+package handler
 
 import (
 	"bytes"
@@ -38,14 +38,14 @@ type LegacyCompletionRequest struct {
 	Suffix           string             `json:"suffix,omitempty"`
 }
 
-// completionsHandler handles POST /v1/completions (legacy text completion API).
+// Completions handles POST /v1/completions (legacy text completion API).
 //
 // Strategy:
 //  1. If the provider supports ProxiableProvider, forward the request verbatim
 //     to the upstream /v1/completions endpoint — the provider handles it natively.
 //  2. Otherwise, convert the prompt to a single user message and route through
 //     the chat completions path, then reformat the response.
-func completionsHandler(registry *providers.Registry) http.HandlerFunc {
+func Completions(registry *providers.Registry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -71,7 +71,7 @@ func completionsHandler(registry *providers.Registry) http.HandlerFunc {
 
 		// --- Path 1: native proxy to provider's /v1/completions ---
 		if pp, canProxy := p.(providers.ProxiableProvider); canProxy {
-			target, err := completionsEndpointURL(pp.BaseURL())
+			target, err := CompletionsEndpointURL(pp.BaseURL())
 			if err != nil {
 				apierror.WriteOpenAI(w, http.StatusInternalServerError, err.Error(), "server_error", "internal_error")
 				return
@@ -179,7 +179,8 @@ func completionsHandler(registry *providers.Registry) http.HandlerFunc {
 	}
 }
 
-func completionsEndpointURL(baseURL string) (string, error) {
+// CompletionsEndpointURL resolves the upstream /v1/completions URL from a provider base URL.
+func CompletionsEndpointURL(baseURL string) (string, error) {
 	u, err := url.Parse(baseURL)
 	if err != nil {
 		return "", fmt.Errorf("invalid provider base URL %q: %w", baseURL, err)

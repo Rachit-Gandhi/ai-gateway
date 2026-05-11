@@ -1,0 +1,160 @@
+package middleware
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/ferro-labs/ai-gateway/internal/ratelimit"
+)
+
+const testIP = "1.2.3.4:1234"
+
+func makeRateLimitHandler(store *ratelimit.Store) http.Handler {
+	return RateLimit(store)(dummyHandler)
+}
+
+func TestRateLimit_AllowsRequestUnderLimit(t *testing.T) {
+	store := ratelimit.NewStore(10, 10)
+	handler := makeRateLimitHandler(store)
+
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.RemoteAddr = testIP
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestRateLimit_Blocks_WhenBurstExceeded(t *testing.T) {
+	// burst=1: first request consumes the only token, second is rejected.
+	store := ratelimit.NewStore(1, 1)
+	handler := makeRateLimitHandler(store)
+
+	ip := testIP
+
+	first := httptest.NewRequest(http.MethodGet, "/", nil)
+	first.RemoteAddr = ip
+	w1 := httptest.NewRecorder()
+	handler.ServeHTTP(w1, first)
+	if w1.Code != http.StatusOK {
+		t.Fatalf("first request: expected 200, got %d", w1.Code)
+	}
+
+	second := httptest.NewRequest(http.MethodGet, "/", nil)
+	second.RemoteAddr = ip
+	w2 := httptest.NewRecorder()
+	handler.ServeHTTP(w2, second)
+	if w2.Code != http.StatusTooManyRequests {
+		t.Fatalf("second request: expected 429, got %d", w2.Code)
+	}
+}
+
+func TestRateLimit_Returns429WithOpenAIErrorBody(t *testing.T) {
+	store := ratelimit.NewStore(1, 1)
+	handler := makeRateLimitHandler(store)
+
+	ip := testIP
+
+	// Exhaust the bucket.
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.RemoteAddr = ip
+	handler.ServeHTTP(httptest.NewRecorder(), r)
+
+	// Blocked request — check content type and body shape.
+	r2 := httptest.NewRequest(http.MethodGet, "/", nil)
+	r2.RemoteAddr = ip
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, r2)
+
+	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("expected application/json, got %q", ct)
+	}
+	body := w.Body.String()
+	for _, want := range []string{`"error"`, `"rate_limit_error"`, `"rate_limit_exceeded"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("response body missing %q: %s", want, body)
+		}
+	}
+}
+
+func TestRateLimit_UsesXForwardedFor_WhenPresent(t *testing.T) {
+	// burst=1: use the forwarded IP as the rate-limit key.
+	store := ratelimit.NewStore(1, 1)
+	handler := makeRateLimitHandler(store)
+
+	makeReq := func() *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.RemoteAddr = "10.0.0.1:9999"                           // proxy address
+		r.Header.Set("X-Forwarded-For", "203.0.113.5, 10.0.0.1") // real client first
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		return w
+	}
+
+	if makeReq().Code != http.StatusOK {
+		t.Fatal("first request via XFF should be allowed")
+	}
+	if makeReq().Code != http.StatusTooManyRequests {
+		t.Fatal("second request via XFF should be rate-limited")
+	}
+}
+
+func TestRateLimit_DifferentIPs_IndependentBuckets(t *testing.T) {
+	// burst=1: each IP gets its own bucket so both first requests pass.
+	store := ratelimit.NewStore(1, 1)
+	handler := makeRateLimitHandler(store)
+
+	for _, ip := range []string{"1.1.1.1:1", "2.2.2.2:2"} {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.RemoteAddr = ip
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("IP %s: expected 200, got %d", ip, w.Code)
+		}
+	}
+}
+
+func TestRateLimit_NilStore_Panics(t *testing.T) {
+	// Passing a nil store is a programmer error; document it panics rather than
+	// silently allowing all traffic.
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic with nil store, got none")
+		}
+	}()
+	RateLimit(nil)(dummyHandler).ServeHTTP(
+		httptest.NewRecorder(),
+		httptest.NewRequest(http.MethodGet, "/", nil),
+	)
+}
+
+func TestRateLimit_NextHandler_NotCalledOnBlock(t *testing.T) {
+	store := ratelimit.NewStore(1, 1)
+	called := false
+	next := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) { called = true })
+	handler := RateLimit(store)(next)
+
+	ip := "5.5.5.5:5"
+
+	// First request passes — next is called.
+	r1 := httptest.NewRequest(http.MethodGet, "/", nil)
+	r1.RemoteAddr = ip
+	handler.ServeHTTP(httptest.NewRecorder(), r1)
+	if !called {
+		t.Fatal("next should be called on first (allowed) request")
+	}
+
+	// Second request is blocked — next must not be called again.
+	called = false
+	r2 := httptest.NewRequest(http.MethodGet, "/", nil)
+	r2.RemoteAddr = ip
+	handler.ServeHTTP(httptest.NewRecorder(), r2)
+	if called {
+		t.Fatal("next must not be called when request is rate-limited")
+	}
+}

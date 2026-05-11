@@ -1,4 +1,4 @@
-package main
+package handler
 
 import (
 	"context"
@@ -61,7 +61,7 @@ func TestCompletionsEndpointURL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := completionsEndpointURL(tt.baseURL)
+			got, err := CompletionsEndpointURL(tt.baseURL)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("expected error for base URL %q", tt.baseURL)
@@ -95,7 +95,7 @@ func TestCompletionsHandler_ProxyPath_DoesNotDuplicateV1(t *testing.T) {
 	}
 	reg.Register(op)
 
-	h := completionsHandler(reg)
+	h := Completions(reg)
 	req := httptest.NewRequest(http.MethodPost, "/v1/completions", strings.NewReader(`{"model":"gpt-4o","prompt":"hi"}`))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -116,7 +116,7 @@ func TestCompletionsHandler_ShimsStreamRequest_ReturnsExplicitError(t *testing.T
 	reg := providers.NewRegistry()
 	reg.Register(np)
 
-	h := completionsHandler(reg)
+	h := Completions(reg)
 	req := httptest.NewRequest(http.MethodPost, "/v1/completions", strings.NewReader(`{"model":"non-proxy-model","prompt":"hi","stream":true}`))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()

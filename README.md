@@ -44,7 +44,7 @@ Get from zero to first request in under 2 minutes.
 ### Option A — Binary (fastest)
 
 ```bash
-curl -fsSL https://github.com/ferro-labs/ai-gateway/releases/download/v1.0.3/ferrogw_1.0.3_linux_amd64.tar.gz | tar xz
+curl -fsSL https://github.com/ferro-labs/ai-gateway/releases/download/v1.0.6/ferrogw_1.0.6_linux_amd64.tar.gz | tar xz
 chmod +x ferrogw
 ./ferrogw init          # generates config.yaml + MASTER_KEY
 ./ferrogw               # starts the server
@@ -116,9 +116,11 @@ aliases:
 
 ```bash
 export OPENAI_API_KEY=sk-your-key
+export MASTER_KEY=fgw_your-master-key   # set by ferrogw init
 
 curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $MASTER_KEY" \
   -d '{
     "model": "gpt-4o-mini",
     "messages": [{"role": "user", "content": "Hello from Ferro Labs AI Gateway"}]
@@ -352,6 +354,7 @@ See [config.example.yaml](config.example.yaml) and [config.example.json](config.
 | Command | Description |
 |:--------|:------------|
 | `ferrogw` | Start the gateway server (default) |
+| `ferrogw serve` | Start the gateway server (explicit) |
 | `ferrogw init` | First-run setup — generate master key and config |
 | `ferrogw validate` | Validate a config file without starting |
 | `ferrogw doctor` | Check environment (API keys, config, connectivity) |
@@ -359,10 +362,10 @@ See [config.example.yaml](config.example.yaml) and [config.example.json](config.
 | `ferrogw version` | Print version, commit, and build info |
 | `ferrogw admin keys list` | List API keys |
 | `ferrogw admin keys create <name>` | Create an API key |
-| `ferrogw admin stats` | Show usage statistics |
+| `ferrogw admin logs stats` | Show request log statistics |
 | `ferrogw plugins` | List registered plugins |
 
-Global flags available on all subcommands: `--gateway-url`, `--api-key`, `--format` (text/json/yaml), `--no-color`.
+Global flags available on all subcommands: `--gateway-url`, `--api-key`, `--format` (table/json/yaml).
 
 ---
 
@@ -423,7 +426,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up
 **Prod** (pin to a release tag — never use `latest` in production):
 
 ```bash
-IMAGE_TAG=v1.0.1 CORS_ORIGINS=https://your-domain.com \
+IMAGE_TAG=v1.0.6 CORS_ORIGINS=https://your-domain.com \
   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 ```
 
