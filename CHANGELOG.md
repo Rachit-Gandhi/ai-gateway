@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.0.7] — 2026-05-11
+
+Internal architecture release completing the `cmd/ferrogw` refactor. No public API or behaviour changes.
+
+### Changed
+
+- **`cmd/ferrogw` refactor — Phases 2–6**: Moved all remaining business logic out of `cmd/ferrogw/` into dedicated `internal/` packages. `main.go` is now 59 lines of Cobra wiring + plugin imports.
+  - `internal/httpserver/` — HTTP server constructor (`server.go`) and Prometheus connection tracker (`conntracker.go`)
+  - `internal/proxy/` — Pass-through reverse proxy and model scanner (benchmarks preserved)
+  - `internal/handler/` — All `/v1/*` HTTP handlers: chat completions, completions, embeddings, images, models
+  - `internal/middleware/` — Rate-limit middleware and proxy-auth middleware (joined existing CORS)
+  - `internal/dashboard/` — Template rendering, pprof wiring, and startup logo
+  - `internal/httpserver/router.go` — Full Chi router wiring
+  - `internal/bootstrap/bootstrap.go` — Gateway construction, provider registration, config loading, startup banner, and `Serve()` entry point
+
+---
+
 ## [1.0.6] — 2026-05-06
 
 Feature release adding official Python and TypeScript SDKs, Helm chart distribution via ArtifactHub, and Replicate streaming support.

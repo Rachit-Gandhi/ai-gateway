@@ -1,4 +1,5 @@
-package main
+// Package handler provides HTTP handler functions for the OpenAI-compatible API.
+package handler
 
 import (
 	"encoding/json"
@@ -82,7 +83,8 @@ func (r *routeChatCompletionRequest) reset() {
 	r.LogitBias = nil           // field 19: map[string]float64
 }
 
-func decodeChatCompletionRequest(r io.Reader) (providers.Request, error) {
+// DecodeChatCompletionRequest decodes the JSON body into a providers.Request.
+func DecodeChatCompletionRequest(r io.Reader) (providers.Request, error) {
 	wire := getRouteChatCompletionRequest()
 	defer putRouteChatCompletionRequest(wire)
 	if err := json.NewDecoder(r).Decode(wire); err != nil {

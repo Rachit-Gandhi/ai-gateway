@@ -1,4 +1,6 @@
-package main
+// Package dashboard provides template rendering and asset helpers for the
+// gateway web dashboard.
+package dashboard
 
 import (
 	"fmt"
@@ -10,8 +12,6 @@ import (
 	"strings"
 
 	"github.com/ferro-labs/ai-gateway/internal/apierror"
-	"github.com/ferro-labs/ai-gateway/internal/metrics"
-	"github.com/ferro-labs/ai-gateway/internal/ratelimit"
 	webassets "github.com/ferro-labs/ai-gateway/web"
 	"github.com/go-chi/chi/v5"
 )
@@ -35,7 +35,8 @@ func init() {
 	}
 }
 
-func renderWebTemplate(w http.ResponseWriter, pageName string, data any) error {
+// RenderWebTemplate writes the named page template to w.
+func RenderWebTemplate(w http.ResponseWriter, pageName string, data any) error {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	tmpl, ok := pageTemplates[pageName]
 	if !ok {
@@ -44,7 +45,8 @@ func renderWebTemplate(w http.ResponseWriter, pageName string, data any) error {
 	return tmpl.ExecuteTemplate(w, "layout.html", data)
 }
 
-func mountPprofRoutes(r chi.Router) {
+// MountPprofRoutes registers /debug/pprof/* routes on r when ENABLE_PPROF is set.
+func MountPprofRoutes(r chi.Router) {
 	if !pprofEnabled() {
 		return
 	}
@@ -70,26 +72,8 @@ func pprofEnabled() bool {
 	return v == "1" || v == "true" || v == "yes"
 }
 
-func rateLimitMiddleware(store *ratelimit.Store) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ip := r.RemoteAddr
-			if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-				parts := strings.SplitN(xff, ",", 2)
-				ip = strings.TrimSpace(parts[0])
-			}
-			if !store.Allow(ip) {
-				metrics.RateLimitRejections.WithLabelValues("ip").Inc()
-				apierror.WriteOpenAI(w, http.StatusTooManyRequests,
-					"rate limit exceeded", "rate_limit_error", "rate_limit_exceeded")
-				return
-			}
-			next.ServeHTTP(w, r)
-		})
-	}
-}
-
-func serveLogo(w http.ResponseWriter) {
+// ServeLogo writes the embedded logo.png to w.
+func ServeLogo(w http.ResponseWriter) {
 	data, err := fs.ReadFile(webassets.Assets, "logo.png")
 	if err != nil {
 		apierror.WriteOpenAI(w, http.StatusNotFound, "logo not found", "not_found_error", "resource_not_found")

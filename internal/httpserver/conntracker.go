@@ -1,4 +1,4 @@
-package main
+package httpserver
 
 import (
 	"context"
@@ -12,27 +12,29 @@ import (
 
 type connContextKey struct{}
 
-type connMetadata struct {
+// ConnMetadata holds per-connection observability data stored in the request context.
+type ConnMetadata struct {
 	ID         uint64
 	LocalAddr  string
 	RemoteAddr string
 }
 
-type serverConnTracker struct {
+type connTracker struct {
 	nextID atomic.Uint64
 
 	mu     sync.Mutex
 	states map[net.Conn]http.ConnState
 }
 
-func newServerConnTracker() *serverConnTracker {
-	return &serverConnTracker{
+func newConnTracker() *connTracker {
+	return &connTracker{
 		states: make(map[net.Conn]http.ConnState),
 	}
 }
 
-func (t *serverConnTracker) ConnContext(ctx context.Context, conn net.Conn) context.Context {
-	meta := connMetadata{
+// ConnContext attaches a ConnMetadata to the context for each new connection.
+func (t *connTracker) ConnContext(ctx context.Context, conn net.Conn) context.Context {
+	meta := ConnMetadata{
 		ID:         t.nextID.Add(1),
 		LocalAddr:  conn.LocalAddr().String(),
 		RemoteAddr: conn.RemoteAddr().String(),
@@ -40,11 +42,12 @@ func (t *serverConnTracker) ConnContext(ctx context.Context, conn net.Conn) cont
 	return context.WithValue(ctx, connContextKey{}, meta)
 }
 
-func (t *serverConnTracker) ConnState(conn net.Conn, state http.ConnState) {
+// ConnState records state transitions and updates Prometheus gauges/counters.
+func (t *connTracker) ConnState(conn net.Conn, state http.ConnState) {
 	t.observe(conn, state)
 }
 
-func (t *serverConnTracker) observe(conn net.Conn, state http.ConnState) {
+func (t *connTracker) observe(conn net.Conn, state http.ConnState) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -66,8 +69,9 @@ func (t *serverConnTracker) observe(conn net.Conn, state http.ConnState) {
 	}
 }
 
-func connMetadataFromContext(ctx context.Context) (connMetadata, bool) {
-	meta, ok := ctx.Value(connContextKey{}).(connMetadata)
+// ConnMetadataFromContext extracts connection metadata stored by ConnContext.
+func ConnMetadataFromContext(ctx context.Context) (ConnMetadata, bool) {
+	meta, ok := ctx.Value(connContextKey{}).(ConnMetadata)
 	return meta, ok
 }
 

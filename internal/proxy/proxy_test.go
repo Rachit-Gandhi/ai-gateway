@@ -1,4 +1,4 @@
-package main
+package proxy
 
 import (
 	"bytes"
@@ -30,9 +30,9 @@ func TestResolveProvider_XProviderHeader(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/files", nil)
 	req.Header.Set("X-Provider", providerOpenAI)
 
-	p, ok := resolveProvider(req, reg)
+	p, ok := ResolveProvider(req, reg)
 	if !ok {
-		t.Fatal("resolveProvider() returned false, want true")
+		t.Fatal("ResolveProvider() returned false, want true")
 	}
 	if p.Name() != providerOpenAI {
 		t.Errorf("provider name = %q, want openai", p.Name())
@@ -47,9 +47,9 @@ func TestResolveProvider_ModelInBody(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	req.ContentLength = int64(len(body))
 
-	p, ok := resolveProvider(req, reg)
+	p, ok := ResolveProvider(req, reg)
 	if !ok {
-		t.Fatal("resolveProvider() returned false, want true")
+		t.Fatal("ResolveProvider() returned false, want true")
 	}
 	if p.Name() != providerOpenAI {
 		t.Errorf("provider name = %q, want openai", p.Name())
@@ -62,9 +62,9 @@ func TestResolveProvider_UnknownProvider(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/files", nil)
 	req.Header.Set("X-Provider", "nonexistent")
 
-	_, ok := resolveProvider(req, reg)
+	_, ok := ResolveProvider(req, reg)
 	if ok {
-		t.Error("resolveProvider() returned true for unknown provider, want false")
+		t.Error("ResolveProvider() returned true for unknown provider, want false")
 	}
 }
 
@@ -73,9 +73,9 @@ func TestResolveProvider_NoProviderInfo(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/files", nil)
 
-	_, ok := resolveProvider(req, reg)
+	_, ok := ResolveProvider(req, reg)
 	if ok {
-		t.Error("resolveProvider() returned true with no provider info, want false")
+		t.Error("ResolveProvider() returned true with no provider info, want false")
 	}
 }
 
@@ -86,15 +86,15 @@ func TestResolveProvider_BodyRestoredAfterRead(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/test", strings.NewReader(body))
 	req.ContentLength = int64(len(body))
 
-	resolveProvider(req, reg) //nolint:errcheck
+	ResolveProvider(req, reg) //nolint:errcheck
 
 	// Body should be restored and readable again.
 	data, err := io.ReadAll(req.Body)
 	if err != nil {
-		t.Fatalf("failed to read body after resolveProvider: %v", err)
+		t.Fatalf("failed to read body after ResolveProvider: %v", err)
 	}
 	if string(data) != body {
-		t.Errorf("body after resolveProvider = %q, want %q", string(data), body)
+		t.Errorf("body after ResolveProvider = %q, want %q", string(data), body)
 	}
 }
 
@@ -106,9 +106,9 @@ func TestResolveProvider_ModelAfterLargeNestedField(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	req.ContentLength = int64(len(body))
 
-	p, ok := resolveProvider(req, reg)
+	p, ok := ResolveProvider(req, reg)
 	if !ok {
-		t.Fatal("resolveProvider() returned false, want true")
+		t.Fatal("ResolveProvider() returned false, want true")
 	}
 	if p.Name() != providerOpenAI {
 		t.Errorf("provider name = %q, want openai", p.Name())
@@ -116,10 +116,10 @@ func TestResolveProvider_ModelAfterLargeNestedField(t *testing.T) {
 
 	data, err := io.ReadAll(req.Body)
 	if err != nil {
-		t.Fatalf("failed to read body after resolveProvider: %v", err)
+		t.Fatalf("failed to read body after ResolveProvider: %v", err)
 	}
 	if string(data) != body {
-		t.Errorf("body after resolveProvider = %q, want %q", string(data), body)
+		t.Errorf("body after ResolveProvider = %q, want %q", string(data), body)
 	}
 }
 
@@ -131,17 +131,17 @@ func TestResolveProvider_IgnoresNestedModelField(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	req.ContentLength = int64(len(body))
 
-	_, ok := resolveProvider(req, reg)
+	_, ok := ResolveProvider(req, reg)
 	if ok {
-		t.Fatal("resolveProvider() returned true for nested model field, want false")
+		t.Fatal("ResolveProvider() returned true for nested model field, want false")
 	}
 
 	data, err := io.ReadAll(req.Body)
 	if err != nil {
-		t.Fatalf("failed to read body after resolveProvider: %v", err)
+		t.Fatalf("failed to read body after ResolveProvider: %v", err)
 	}
 	if string(data) != body {
-		t.Errorf("body after resolveProvider = %q, want %q", string(data), body)
+		t.Errorf("body after ResolveProvider = %q, want %q", string(data), body)
 	}
 }
 
@@ -155,7 +155,7 @@ func TestProxyHandler_ForwardsRequest(t *testing.T) {
 	defer upstream.Close()
 
 	reg := buildTestRegistry(upstream.URL)
-	handler := proxyHandler(reg)
+	handler := Handler(reg)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/files", strings.NewReader(`{}`))
 	req.Header.Set("X-Provider", providerOpenAI)
@@ -180,7 +180,7 @@ func TestProxyHandler_InjectsAuthHeader(t *testing.T) {
 	defer upstream.Close()
 
 	reg := buildTestRegistry(upstream.URL)
-	handler := proxyHandler(reg)
+	handler := Handler(reg)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/files", nil)
 	req.Header.Set("X-Provider", providerOpenAI)
@@ -203,7 +203,7 @@ func TestProxyHandler_RemovesGatewayHeaders(t *testing.T) {
 	defer upstream.Close()
 
 	reg := buildTestRegistry(upstream.URL)
-	handler := proxyHandler(reg)
+	handler := Handler(reg)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/files", nil)
 	req.Header.Set("X-Provider", providerOpenAI)
@@ -224,7 +224,7 @@ func TestProxyHandler_AddsGatewayProviderHeader(t *testing.T) {
 	defer upstream.Close()
 
 	reg := buildTestRegistry(upstream.URL)
-	handler := proxyHandler(reg)
+	handler := Handler(reg)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/files", nil)
 	req.Header.Set("X-Provider", providerOpenAI)
@@ -247,7 +247,7 @@ func TestProxyHandler_RebuildsForwardedHeaders(t *testing.T) {
 	defer upstream.Close()
 
 	reg := buildTestRegistry(upstream.URL)
-	handler := proxyHandler(reg)
+	handler := Handler(reg)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/files", nil)
 	req.RemoteAddr = "203.0.113.10:1234"
@@ -274,7 +274,7 @@ func TestProxyHandler_PassthroughNon200(t *testing.T) {
 	defer upstream.Close()
 
 	reg := buildTestRegistry(upstream.URL)
-	handler := proxyHandler(reg)
+	handler := Handler(reg)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/files", nil)
 	req.Header.Set("X-Provider", providerOpenAI)
@@ -289,7 +289,7 @@ func TestProxyHandler_PassthroughNon200(t *testing.T) {
 
 func TestProxyHandler_NoProvider_Returns400(t *testing.T) {
 	reg := providers.NewRegistry() // empty registry
-	handler := proxyHandler(reg)
+	handler := Handler(reg)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/audio/transcriptions", nil)
 	w := httptest.NewRecorder()
@@ -335,7 +335,7 @@ func BenchmarkExtractTopLevelModel(b *testing.B) {
 			Body:          io.NopCloser(bytes.NewReader(body)),
 			ContentLength: int64(len(body)),
 		}
-		model, err := extractTopLevelModel(req)
+		model, err := ExtractTopLevelModel(req)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -367,9 +367,9 @@ func BenchmarkResolveProvider_ModelInBody(b *testing.B) {
 			Body:          io.NopCloser(bytes.NewReader(body)),
 			ContentLength: int64(len(body)),
 		}
-		p, ok := resolveProvider(req, reg)
+		p, ok := ResolveProvider(req, reg)
 		if !ok {
-			b.Fatal("resolveProvider() returned false")
+			b.Fatal("ResolveProvider() returned false")
 		}
 		if p.Name() != providerOpenAI {
 			b.Fatalf("provider = %q, want %q", p.Name(), providerOpenAI)

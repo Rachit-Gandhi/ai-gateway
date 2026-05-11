@@ -1,4 +1,6 @@
-package main
+// Package proxy provides a transparent pass-through HTTP reverse proxy
+// that forwards unhandled /v1/* requests to the matching upstream provider.
+package proxy
 
 import (
 	"bufio"
@@ -14,7 +16,7 @@ import (
 	"github.com/ferro-labs/ai-gateway/providers"
 )
 
-// proxyHandler returns an http.HandlerFunc that transparently forwards
+// Handler returns an http.HandlerFunc that transparently forwards
 // any /v1/* request to the matching upstream provider.
 //
 // This enables pass-through for endpoints the gateway does not handle
@@ -27,9 +29,9 @@ import (
 //  2. "model" field in the JSON request body
 //
 // If neither resolves a provider, a 400 is returned with instructions.
-func proxyHandler(registry *providers.Registry) http.HandlerFunc {
+func Handler(registry *providers.Registry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		p, ok := resolveProvider(r, registry)
+		p, ok := ResolveProvider(r, registry)
 		if !ok {
 			apierror.WriteOpenAI(w, http.StatusBadRequest,
 				`no provider resolved; set the X-Provider header (e.g. "X-Provider: openai") or include a "model" field in the request body`,
@@ -82,10 +84,10 @@ func proxyHandler(registry *providers.Registry) http.HandlerFunc {
 	}
 }
 
-// resolveProvider determines which provider should receive the request.
+// ResolveProvider determines which provider should receive the request.
 // It checks the X-Provider header first, then falls back to model-based lookup
 // by peeking at (and restoring) the JSON request body.
-func resolveProvider(r *http.Request, registry *providers.Registry) (providers.Provider, bool) {
+func ResolveProvider(r *http.Request, registry *providers.Registry) (providers.Provider, bool) {
 	// 1. Explicit header takes precedence.
 	if name := r.Header.Get("X-Provider"); name != "" {
 		return registry.Get(name)
@@ -96,14 +98,16 @@ func resolveProvider(r *http.Request, registry *providers.Registry) (providers.P
 		return nil, false
 	}
 
-	model, err := extractTopLevelModel(r)
+	model, err := ExtractTopLevelModel(r)
 	if err != nil || model == "" {
 		return nil, false
 	}
 	return registry.FindByModel(model)
 }
 
-func extractTopLevelModel(r *http.Request) (string, error) {
+// ExtractTopLevelModel peeks at the JSON body to find the top-level "model"
+// field, then restores the body so it can be read again by downstream handlers.
+func ExtractTopLevelModel(r *http.Request) (string, error) {
 	if r.Body == nil {
 		return "", io.EOF
 	}
@@ -116,6 +120,10 @@ func extractTopLevelModel(r *http.Request) (string, error) {
 	}
 	return model, nil
 }
+
+// TopLevelModelScanner is a low-allocation JSON scanner that reads only the
+// top-level "model" key from a JSON object without decoding the full document.
+type TopLevelModelScanner = topLevelModelScanner
 
 type topLevelModelScanner struct {
 	reader   *bufio.Reader

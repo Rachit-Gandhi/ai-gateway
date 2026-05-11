@@ -44,7 +44,7 @@
 ### 方式 A — 二进制文件（最快）
 
 ```bash
-curl -fsSL https://github.com/ferro-labs/ai-gateway/releases/download/v1.0.3/ferrogw_1.0.3_linux_amd64.tar.gz | tar xz
+curl -fsSL https://github.com/ferro-labs/ai-gateway/releases/download/v1.0.6/ferrogw_1.0.6_linux_amd64.tar.gz | tar xz
 chmod +x ferrogw
 ./ferrogw init          # 生成 config.yaml + MASTER_KEY
 ./ferrogw               # 启动服务器
@@ -116,8 +116,10 @@ aliases:
 
 ```bash
 export OPENAI_API_KEY=sk-your-key
+export MASTER_KEY=fgw_your-master-key
 
 curl http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer $MASTER_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "gpt-4o-mini",
@@ -344,7 +346,7 @@ mcp_servers:
 
 | 命令 | 描述 |
 |:--------|:------------|
-| `ferrogw` | 启动网关服务器（默认） |
+| `ferrogw serve` | 启动网关服务器 |
 | `ferrogw init` | 首次运行配置——生成主密钥和配置文件 |
 | `ferrogw validate` | 验证配置文件而不启动服务 |
 | `ferrogw doctor` | 检查环境（API 密钥、配置、连通性） |
@@ -352,10 +354,10 @@ mcp_servers:
 | `ferrogw version` | 打印版本、提交和构建信息 |
 | `ferrogw admin keys list` | 列出 API 密钥 |
 | `ferrogw admin keys create <name>` | 创建 API 密钥 |
-| `ferrogw admin stats` | 显示使用统计 |
+| `ferrogw admin logs stats` | 显示使用统计 |
 | `ferrogw plugins` | 列出已注册插件 |
 
-所有子命令可用的全局标志：`--gateway-url`、`--api-key`、`--format`（text/json/yaml）、`--no-color`。
+所有子命令可用的全局标志：`--gateway-url`、`--api-key`、`--format`（table/json/yaml）。
 
 ---
 
@@ -416,7 +418,7 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up
 **生产**（固定发布标签——生产环境切勿使用 `latest`）：
 
 ```bash
-IMAGE_TAG=v1.0.1 CORS_ORIGINS=https://your-domain.com \
+IMAGE_TAG=v1.0.6 CORS_ORIGINS=https://your-domain.com \
   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 ```
 

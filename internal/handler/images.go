@@ -1,4 +1,4 @@
-package main
+package handler
 
 import (
 	"encoding/json"
@@ -9,10 +9,10 @@ import (
 	"github.com/ferro-labs/ai-gateway/providers"
 )
 
-// imagesHandler handles POST /v1/images/generations.
+// Images handles POST /v1/images/generations.
 // It routes image generation requests to the first registered ImageProvider that
 // supports the requested model.
-func imagesHandler(gw *aigateway.Gateway) http.HandlerFunc {
+func Images(gw *aigateway.Gateway) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req providers.ImageRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

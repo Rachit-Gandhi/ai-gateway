@@ -1,6 +1,10 @@
-package main
+package handler
 
 import (
+	"encoding/json"
+	"net/http"
+
+	aigateway "github.com/ferro-labs/ai-gateway"
 	"github.com/ferro-labs/ai-gateway/models"
 )
 
@@ -81,4 +85,21 @@ func buildCapsList(c models.Capabilities) []string {
 		caps = append(caps, "finetuneable")
 	}
 	return caps
+}
+
+// Models handles GET /v1/models.
+func Models(gw *aigateway.Gateway) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		catalog := gw.Catalog()
+		raw := gw.AllModels()
+		enriched := make([]EnrichedModelInfo, 0, len(raw))
+		for _, m := range raw {
+			enriched = append(enriched, enrichFromCatalog(catalog, m.OwnedBy, m.ID))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"object": "list",
+			"data":   enriched,
+		})
+	}
 }
