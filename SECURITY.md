@@ -4,13 +4,13 @@
 
 | Version | Supported |
 |---------|-----------|
-| 0.1.x   | ✅ Yes    |
+| 1.0.x   | ✅ Yes    |
 
 ## Reporting a Vulnerability
 
 **Do not open a public GitHub issue for security vulnerabilities.**
 
-Please report security issues by emailing: **shahmitul005@gmail.com**
+Please report security issues by emailing: **security@ferrolabs.ai**
 
 Include the following in your report:
 
