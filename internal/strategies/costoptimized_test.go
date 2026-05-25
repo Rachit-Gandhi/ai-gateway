@@ -96,6 +96,23 @@ func TestCostOptimized_SkipsUnsupportedModel(t *testing.T) {
 	}
 }
 
+func TestCostOptimized_UnresolvableSelectedTargetReturnsError(t *testing.T) {
+	mp := &mockProvider{name: "cheap", models: []string{"gpt-4o"}, resp: &providers.Response{ID: "cheap"}}
+	s := NewCostOptimized(
+		[]Target{{VirtualKey: "cheap"}},
+		lookupMissingAfterFirstHit(mp),
+		buildCatalog(),
+	)
+
+	_, err := s.Execute(context.Background(), providers.Request{
+		Model:    "gpt-4o",
+		Messages: []providers.Message{{Role: "user", Content: "hi"}},
+	})
+	if err == nil {
+		t.Fatal("expected error when selected provider is no longer resolvable")
+	}
+}
+
 func TestCostOptimized_NoTargets(t *testing.T) {
 	s := NewCostOptimized(nil, newLookup(), models.Catalog{})
 	_, err := s.Execute(context.Background(), providers.Request{Model: "gpt-4o"})
