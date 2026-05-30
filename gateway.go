@@ -808,7 +808,7 @@ func (g *Gateway) getStrategy() (strategies.Strategy, error) {
 			continue
 		}
 		timeout, _ := time.ParseDuration(t.CircuitBreaker.Timeout)
-		cb := circuitbreaker.New(t.CircuitBreaker.FailureThreshold, t.CircuitBreaker.SuccessThreshold, timeout)
+		cb := circuitbreaker.New(t.CircuitBreaker.FailureThreshold, t.CircuitBreaker.SuccessThreshold, t.CircuitBreaker.MaxHalfThreshold, timeout)
 		g.circuitBreakers[t.VirtualKey] = cb
 	}
 
