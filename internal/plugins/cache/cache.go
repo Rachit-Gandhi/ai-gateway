@@ -11,9 +11,10 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"hash"
-	"sync"
+	"strconv"
 	"time"
 
+	internalCache "github.com/ferro-labs/ai-gateway/internal/cache"
 	"github.com/ferro-labs/ai-gateway/plugin"
 	"github.com/ferro-labs/ai-gateway/providers"
 )
@@ -30,12 +31,10 @@ type cacheEntry struct {
 }
 
 // ResponseCache is a transform plugin that caches LLM responses using
-// exact-match hashing of the request (model + messages).
+// exact-match hashing of the request (model + messages + logprobs + toplogprobs(optional)).
+// It aliases Memory from the internal cache package.
 type ResponseCache struct {
-	mu         sync.RWMutex
-	entries    map[string]cacheEntry
-	maxAge     time.Duration
-	maxEntries int
+	*internalCache.Memory
 }
 
 // Name returns the plugin identifier.
@@ -58,21 +57,20 @@ func (c *ResponseCache) Init(config map[string]interface{}) error {
 	case float64:
 		maxAge = int(v)
 	}
-	c.maxAge = time.Duration(maxAge) * time.Second
+	ttl := time.Duration(maxAge) * time.Second
 
-	c.maxEntries = 1000
+	capacity := 1000
 	switch v := config["max_entries"].(type) {
 	case int:
-		c.maxEntries = v
+		capacity = v
 	case float64:
-		c.maxEntries = int(v)
+		capacity = int(v)
 	}
-
-	c.entries = make(map[string]cacheEntry)
+	c.Memory = internalCache.NewMemory(capacity, ttl)
 	return nil
 }
 
-// Execute checks for a cache hit (before request) or stores the response (after request).
+// Execute checks for a cache hit (before request) or stores the response (after request) and does maintenance as per LRU policy.
 func (c *ResponseCache) Execute(_ context.Context, pctx *plugin.Context) error {
 	if pctx.Request == nil {
 		return nil
@@ -82,12 +80,8 @@ func (c *ResponseCache) Execute(_ context.Context, pctx *plugin.Context) error {
 
 	if pctx.Response == nil {
 		// before_request: lookup
-		c.mu.RLock()
-		entry, ok := c.entries[key]
-		c.mu.RUnlock()
-
-		if ok && time.Now().Before(entry.expiresAt) {
-			pctx.Response = entry.response
+		if resp, ok := c.Memory.Get(key); ok {
+			pctx.Response = resp
 			pctx.Skip = true
 			pctx.Metadata["cache_hit"] = true
 		}
@@ -99,32 +93,11 @@ func (c *ResponseCache) Execute(_ context.Context, pctx *plugin.Context) error {
 		return nil
 	}
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.maxEntries <= 0 {
+	if c.Memory.Capacity <= 0 {
 		return nil
 	}
 
-	_, exists := c.entries[key]
-	if !exists && len(c.entries) >= c.maxEntries {
-		var evictKey string
-		var evictAt time.Time
-		for existingKey, existingEntry := range c.entries {
-			if evictKey == "" || existingEntry.expiresAt.Before(evictAt) {
-				evictKey = existingKey
-				evictAt = existingEntry.expiresAt
-			}
-		}
-		if evictKey != "" {
-			delete(c.entries, evictKey)
-		}
-	}
-
-	c.entries[key] = cacheEntry{
-		response:  pctx.Response,
-		expiresAt: time.Now().Add(c.maxAge),
-	}
+	c.Memory.Set(key, pctx.Response)
 	return nil
 }
 
@@ -136,6 +109,15 @@ func cacheKey(req *providers.Request) string {
 		writeCacheKeyString(h, m.Name)
 		writeCacheKeyString(h, m.Content)
 	}
+	if req.LogProbs {
+		writeCacheKeyString(h, "true")
+		if req.TopLogProbs != nil {
+			writeCacheKeyString(h, strconv.Itoa(*req.TopLogProbs))
+		}
+	} else {
+		writeCacheKeyString(h, "false")
+	}
+
 	return hex.EncodeToString(h.Sum(nil))
 }
 
