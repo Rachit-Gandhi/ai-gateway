@@ -367,6 +367,30 @@ Build tag headers on every integration test file:
 
 ## Cursor Cloud specific instructions
 
+> **Fork-only — do not send upstream.** This section and commit `ad71cbc` (`docs(agents): add Cursor Cloud dev environment instructions`) exist only on this fork for Cursor Cloud Agent VMs. See **Upstream PRs** below before opening any PR to the upstream repository.
+
+### Upstream PRs (required)
+
+Before opening a pull request to the **upstream** repo (e.g. `ferro-labs/ai-gateway`, remote `upstream`), agents **must not** include Cursor Cloud–only changes:
+
+1. **Exclude commit** `ad71cbc` and any later commits that only touch `## Cursor Cloud specific instructions` in `AGENTS.md`.
+2. **Base the upstream branch on upstream `main`**, not this fork’s `main` if it contains `ad71cbc`:
+   ```bash
+   git fetch upstream
+   git checkout -b cursor/<feature>-5fe8 upstream/main
+   ```
+3. **Cherry-pick** only the product commits (features, fixes, tests), **skipping** `ad71cbc`:
+   ```bash
+   git cherry-pick <sha1> <sha2>   # omit ad71cbc
+   ```
+4. **Verify** `AGENTS.md` matches upstream (no `## Cursor Cloud specific instructions` section):
+   ```bash
+   git diff upstream/main -- AGENTS.md
+   ```
+   The diff should be empty, or contain only intentional upstream documentation edits — never the Cursor Cloud block.
+
+If a branch already includes `ad71cbc`, drop it with `git rebase --onto upstream/main ad71cbc` or revert that commit before pushing to upstream.
+
 ### Tooling
 
 - **Go 1.25+** is required (`go.mod` pins `go 1.25.0`). The VM image may already include it; confirm with `go version`.
