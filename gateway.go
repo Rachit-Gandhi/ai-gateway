@@ -48,24 +48,25 @@ type EventHookFunc func(ctx context.Context, subject string, data map[string]int
 
 // Gateway is the main entry point for routing LLM requests.
 type Gateway struct {
-	mu               sync.RWMutex
-	config           Config
-	catalog          models.Catalog
-	providers        map[string]providers.Provider
-	providerNames    []string
-	strategy         strategies.Strategy
-	plugins          *plugin.Manager
-	closeOnce        sync.Once
-	hooks            []EventHookFunc
-	hookSnapshot     atomic.Value
-	hookDispatchQ    chan hookDispatch
-	hookWorkersDone  sync.WaitGroup
-	shutdownCtx      context.Context
-	shutdownCancel   context.CancelFunc
-	circuitBreakers  map[string]*circuitbreaker.CircuitBreaker
-	discoveredModels map[string][]providers.ModelInfo
-	latencyTracker   *latency.Tracker
-	modelIndex       modelLookupIndex
+	mu                 sync.RWMutex
+	config             Config
+	catalog            models.Catalog
+	providers          map[string]providers.Provider
+	providerNames      []string
+	strategy           strategies.Strategy
+	plugins            *plugin.Manager
+	closeOnce          sync.Once
+	hooks              []EventHookFunc
+	hookSnapshot       atomic.Value
+	hookDispatchQ      chan hookDispatch
+	hookWorkersDone    sync.WaitGroup
+	catalogRefreshDone sync.WaitGroup
+	shutdownCtx        context.Context
+	shutdownCancel     context.CancelFunc
+	circuitBreakers    map[string]*circuitbreaker.CircuitBreaker
+	discoveredModels   map[string][]providers.ModelInfo
+	latencyTracker     *latency.Tracker
+	modelIndex         modelLookupIndex
 
 	// obs is the observability provider used to emit per-request spans.
 	// Defaults to observability.NoOp() when SetObservability has not
@@ -99,13 +100,19 @@ type hookDispatch struct {
 	hook  EventHookFunc
 }
 
-const hookDispatchQueueSize = 256
+const (
+	hookDispatchQueueSize  = 256
+	catalogRefreshInterval = 24 * time.Hour
+)
 
 // New creates a new Gateway instance with the given configuration.
 func New(cfg Config) (*Gateway, error) {
-	catalog, err := models.Load()
+	catalogResult, err := models.LoadWithInfo()
+	recordCatalogLoad(catalogResult.Source, err)
+	catalog := catalogResult.Catalog
 	if err != nil {
 		// Non-fatal: operate without model metadata (no enrichment / cost reporting).
+		slog.Error("model catalog unavailable; continuing without catalog metadata", "url", catalogResult.URL, "error", err)
 		catalog = models.Catalog{}
 	}
 
@@ -129,6 +136,7 @@ func New(cfg Config) (*Gateway, error) {
 	gw.shutdownCtx, gw.shutdownCancel = context.WithCancel(context.Background()) //nolint:gosec // canceled by Gateway.Close()
 	gw.hookSnapshot.Store([]EventHookFunc{})
 	gw.startHookWorkers()
+	gw.startCatalogRefresh()
 
 	// Wire MCP if any servers are configured.
 	if len(cfg.MCPServers) > 0 {
@@ -209,6 +217,56 @@ func (g *Gateway) Catalog() models.Catalog {
 	cp := make(models.Catalog, len(g.catalog))
 	maps.Copy(cp, g.catalog)
 	return cp
+}
+
+func (g *Gateway) startCatalogRefresh() {
+	g.catalogRefreshDone.Add(1)
+	go func() {
+		defer g.catalogRefreshDone.Done()
+		ticker := time.NewTicker(catalogRefreshInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-g.shutdownCtx.Done():
+				return
+			case <-ticker.C:
+				g.refreshCatalog()
+			}
+		}
+	}()
+}
+
+func (g *Gateway) refreshCatalog() {
+	result, err := models.LoadWithInfo()
+	recordCatalogLoad(result.Source, err)
+	if err != nil {
+		slog.Error("model catalog refresh failed", "url", result.URL, "error", err)
+		return
+	}
+	if result.Source != models.LoadSourceRemote {
+		slog.Warn("model catalog refresh skipped; keeping current catalog", "url", result.URL, "source", result.Source)
+		return
+	}
+
+	g.mu.Lock()
+	g.catalog = result.Catalog
+	if g.config.Strategy.Mode == ModeCostOptimized {
+		g.strategy = nil
+	}
+	g.mu.Unlock()
+
+	slog.Info("model catalog refreshed", "url", result.URL, "models", len(result.Catalog))
+}
+
+func recordCatalogLoad(source models.LoadSource, err error) {
+	if source == "" {
+		source = models.LoadSourceFallback
+	}
+	result := "success"
+	if err != nil {
+		result = "error"
+	}
+	metrics.CatalogLoadsTotal.WithLabelValues(string(source), result).Inc()
 }
 
 // Event subject constants used when invoking gateway hooks.
@@ -1657,9 +1715,9 @@ func (g *Gateway) FindStreamingByModel(model string) (providers.StreamProvider, 
 
 // Close cleans up resources.
 //
-// Cancels the gateway shutdown context (which signals hook workers to drain
-// and exit) and waits up to 5s for the workers to finish so in-flight hook
-// dispatches are not abruptly killed. Returns nil even if the worker drain
+// Cancels the gateway shutdown context (which signals hook workers and the
+// catalog refresh worker to exit) and waits up to 5s for workers to finish so
+// in-flight hook dispatches are not abruptly killed. Returns nil even if the worker drain
 // times out — Close must never block indefinitely (a panicking hook could
 // otherwise wedge shutdown).
 //
@@ -1670,6 +1728,7 @@ func (g *Gateway) Close() error {
 		done := make(chan struct{})
 		go func() {
 			g.hookWorkersDone.Wait()
+			g.catalogRefreshDone.Wait()
 			close(done)
 		}()
 		select {

@@ -1,6 +1,11 @@
 package models
 
 import (
+	"bytes"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -90,6 +95,100 @@ func TestCatalogNullVsZero(t *testing.T) {
 	}
 	if count > 0 {
 		t.Logf("Found %d pricing fields set to 0.0 in paid providers — review if intentional", count)
+	}
+}
+
+func TestDefaultCatalogURLUsesModelCatalogReleaseAsset(t *testing.T) {
+	if !strings.Contains(defaultCatalogURL, "github.com/ferro-labs/model-catalog/releases/latest/download/catalog.json") {
+		t.Fatalf("defaultCatalogURL = %q, want model-catalog latest release asset", defaultCatalogURL)
+	}
+}
+
+func TestLoadWithInfoUsesRemoteCatalog(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"test/remote":{"provider":"test","model_id":"remote","mode":"chat"}}`))
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv(CatalogURLEnv, server.URL)
+
+	result, err := LoadWithInfo()
+	if err != nil {
+		t.Fatalf("LoadWithInfo returned error: %v", err)
+	}
+	if result.Source != LoadSourceRemote {
+		t.Fatalf("Source = %q, want %q", result.Source, LoadSourceRemote)
+	}
+	if result.URL != server.URL {
+		t.Fatalf("URL = %q, want %q", result.URL, server.URL)
+	}
+	model, ok := result.Catalog.Get("test/remote")
+	if !ok {
+		t.Fatal("remote catalog model not found")
+	}
+	if model.ModelID != "remote" {
+		t.Fatalf("ModelID = %q, want remote", model.ModelID)
+	}
+}
+
+func TestLoadWithInfoFallsBackWhenRemoteFetchFails(t *testing.T) {
+	var buf bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	t.Setenv(CatalogURLEnv, "http://127.0.0.1:1/catalog.json")
+
+	result, err := LoadWithInfo()
+	if err != nil {
+		t.Fatalf("LoadWithInfo returned error: %v", err)
+	}
+	if result.Source != LoadSourceFallback {
+		t.Fatalf("Source = %q, want %q", result.Source, LoadSourceFallback)
+	}
+	if len(result.Catalog) == 0 {
+		t.Fatal("fallback catalog is empty")
+	}
+	if !strings.Contains(buf.String(), "using embedded fallback") {
+		t.Fatalf("fallback warning was not logged: %s", buf.String())
+	}
+}
+
+func TestLoadWithInfoFallsBackWhenRemoteParseFails(t *testing.T) {
+	var buf bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`not json`))
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv(CatalogURLEnv, server.URL)
+
+	result, err := LoadWithInfo()
+	if err != nil {
+		t.Fatalf("LoadWithInfo returned error: %v", err)
+	}
+	if result.Source != LoadSourceFallback {
+		t.Fatalf("Source = %q, want %q", result.Source, LoadSourceFallback)
+	}
+	if len(result.Catalog) == 0 {
+		t.Fatal("fallback catalog is empty")
+	}
+	if !strings.Contains(buf.String(), "could not be parsed") {
+		t.Fatalf("parse fallback warning was not logged: %s", buf.String())
+	}
+}
+
+func TestLoadWithInfoFallsBackForInvalidOverrideURL(t *testing.T) {
+	t.Setenv(CatalogURLEnv, "file:///tmp/catalog.json")
+
+	result, err := LoadWithInfo()
+	if err != nil {
+		t.Fatalf("LoadWithInfo returned error: %v", err)
+	}
+	if result.Source != LoadSourceFallback {
+		t.Fatalf("Source = %q, want %q", result.Source, LoadSourceFallback)
 	}
 }
 

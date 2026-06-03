@@ -1,10 +1,9 @@
 // Package models provides the model catalog — a structured map of every
 // supported model's pricing, capabilities, and lifecycle metadata.
 //
-// The catalog is loaded once at gateway startup from a remote URL with an
-// embedded backup as fallback. Cost calculation via [Calculate] is performed
-// synchronously after the upstream provider responds, before the gateway
-// publishes its completion event.
+// The catalog is loaded from a remote URL with an embedded backup as fallback.
+// Cost calculation via [Calculate] is performed synchronously after the upstream
+// provider responds, before the gateway publishes its completion event.
 package models
 
 import (
@@ -12,9 +11,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -26,7 +27,24 @@ var bundledCatalog []byte
 // Useful for air-gapped deployments or enterprise custom pricing.
 const CatalogURLEnv = "FERRO_MODEL_CATALOG_URL"
 
-const defaultCatalogURL = "https://raw.githubusercontent.com/ferro-labs/ai-gateway/main/models/catalog.json"
+const defaultCatalogURL = "https://github.com/ferro-labs/model-catalog/releases/latest/download/catalog.json"
+
+// LoadSource identifies where a catalog load came from.
+type LoadSource string
+
+const (
+	// LoadSourceRemote means the catalog was loaded from the configured URL.
+	LoadSourceRemote LoadSource = "remote"
+	// LoadSourceFallback means the embedded backup catalog was used.
+	LoadSourceFallback LoadSource = "fallback"
+)
+
+// LoadResult describes a completed catalog load.
+type LoadResult struct {
+	Catalog Catalog
+	Source  LoadSource
+	URL     string
+}
 
 // modelIDIndex is a reverse lookup from bare model ID to catalog key. It is
 // rebuilt by parse() on every catalog load so loaded catalogs can resolve bare
@@ -130,20 +148,37 @@ type Lifecycle struct {
 // On any failure it falls back to the embedded catalog_backup.json.
 // The gateway never fails to start due to catalog unavailability.
 func Load() (Catalog, error) {
-	url := os.Getenv(CatalogURLEnv)
-	if url == "" {
-		url = defaultCatalogURL
+	result, err := LoadWithInfo()
+	return result.Catalog, err
+}
+
+// LoadWithInfo fetches the model catalog and returns metadata about whether
+// the remote source or embedded fallback was used.
+func LoadWithInfo() (LoadResult, error) {
+	catalogURL := os.Getenv(CatalogURLEnv)
+	if catalogURL == "" {
+		catalogURL = defaultCatalogURL
 	}
 
-	if data, err := fetchRemote(url); err == nil {
-		if c, err := parse(data); err == nil {
-			return c, nil
+	if data, err := fetchRemote(catalogURL); err == nil {
+		c, parseErr := parse(data)
+		if parseErr == nil {
+			return LoadResult{Catalog: c, Source: LoadSourceRemote, URL: catalogURL}, nil
 		}
-		// Remote fetch succeeded but JSON unmarshal failed (truncated download,
-		// invalid payload, schema mismatch) — fall through to embedded backup.
+		slog.Warn("model catalog remote response could not be parsed; using embedded fallback", "url", safeLogValue(catalogURL), "error", safeLogValue(parseErr.Error())) //nolint:gosec // values are CR/LF-sanitized before logging.
+	} else {
+		slog.Warn("model catalog remote fetch failed; using embedded fallback", "url", safeLogValue(catalogURL), "error", safeLogValue(err.Error())) //nolint:gosec // values are CR/LF-sanitized before logging.
 	}
-	// Silent fallback — use the embedded copy shipped with the binary.
-	return parse(bundledCatalog)
+
+	c, err := parse(bundledCatalog)
+	if err != nil {
+		return LoadResult{Source: LoadSourceFallback, URL: catalogURL}, err
+	}
+	return LoadResult{Catalog: c, Source: LoadSourceFallback, URL: catalogURL}, nil
+}
+
+func safeLogValue(value string) string {
+	return strings.NewReplacer("\r", "\\r", "\n", "\\n").Replace(value)
 }
 
 func fetchRemote(rawURL string) ([]byte, error) {
