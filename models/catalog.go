@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -27,10 +28,17 @@ const CatalogURLEnv = "FERRO_MODEL_CATALOG_URL"
 
 const defaultCatalogURL = "https://raw.githubusercontent.com/ferro-labs/ai-gateway/main/models/catalog.json"
 
-// modelIDIndex is a reverse lookup from bare model ID to catalog key.
-// Rebuilt by parse() on every catalog load so that Get() can resolve
-// bare model IDs in O(1) instead of scanning all ~2,500 entries.
-var modelIDIndex map[string]string
+// modelIDIndex is a reverse lookup from bare model ID to catalog key. It is
+// rebuilt by parse() on every catalog load so loaded catalogs can resolve bare
+// model IDs in O(1) instead of scanning all ~2,500 entries.
+//
+// Catalog is intentionally still a map type for API compatibility, so Get()
+// validates indexed hits against the receiver and falls back to scanning when
+// callers pass an arbitrary or stale Catalog value.
+var (
+	modelIDIndexMu sync.RWMutex
+	modelIDIndex   map[string]string
+)
 
 // BuildIndex constructs the reverse modelID → key index for a catalog that
 // was not loaded through [Load] or [parse] (e.g. in tests). Calling this
@@ -42,6 +50,8 @@ func BuildIndex(c Catalog) {
 			idx[m.ModelID] = key
 		}
 	}
+	modelIDIndexMu.Lock()
+	defer modelIDIndexMu.Unlock()
 	modelIDIndex = idx
 }
 
@@ -172,9 +182,20 @@ func (c Catalog) Get(key string) (Model, bool) {
 		return m, true
 	}
 	// Bare model ID: use the reverse index for constant-time lookup.
+	modelIDIndexMu.RLock()
 	if idxKey, ok := modelIDIndex[key]; ok {
-		if m, ok := c[idxKey]; ok {
+		modelIDIndexMu.RUnlock()
+		if m, ok := c[idxKey]; ok && m.ModelID == key {
 			return m, true
+		}
+	} else {
+		modelIDIndexMu.RUnlock()
+	}
+	// Arbitrary Catalog values may not have an index, or another catalog load
+	// may have replaced the package index. Preserve the pre-index behavior.
+	for _, v := range c {
+		if v.ModelID == key {
+			return v, true
 		}
 	}
 	return Model{}, false

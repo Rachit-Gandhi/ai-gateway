@@ -1,6 +1,7 @@
 package models
 
 import (
+	"sync"
 	"testing"
 )
 
@@ -113,6 +114,100 @@ func TestCatalogGet(t *testing.T) {
 	if _, ok := c.Get("nonexistent-model"); ok {
 		t.Error("Get with unknown model should return false")
 	}
+}
+
+func TestCatalogGetDirectCatalogFallsBackToScan(t *testing.T) {
+	BuildIndex(Catalog{})
+	c := Catalog{
+		"custom/custom-model": {
+			Provider: "custom",
+			ModelID:  "custom-model",
+			Mode:     ModeChat,
+		},
+	}
+
+	if _, ok := c.Get("custom-model"); !ok {
+		t.Fatal("Get with bare model ID should succeed without BuildIndex")
+	}
+}
+
+func TestCatalogGetStaleIndexFallsBackToScan(t *testing.T) {
+	BuildIndex(Catalog{
+		"old/provider-model": {
+			Provider: "old",
+			ModelID:  "same-model",
+			Mode:     ModeChat,
+		},
+	})
+	c := Catalog{
+		"new/provider-model": {
+			Provider: "new",
+			ModelID:  "same-model",
+			Mode:     ModeChat,
+		},
+	}
+
+	got, ok := c.Get("same-model")
+	if !ok {
+		t.Fatal("Get with bare model ID should succeed with stale index")
+	}
+	if got.Provider != "new" {
+		t.Fatalf("Get returned provider %q, want new", got.Provider)
+	}
+}
+
+func TestCatalogGetStaleIndexValidatesModelID(t *testing.T) {
+	BuildIndex(Catalog{
+		"shared/key": {
+			Provider: "old",
+			ModelID:  "old-model",
+			Mode:     ModeChat,
+		},
+	})
+	c := Catalog{
+		"shared/key": {
+			Provider: "new",
+			ModelID:  "new-model",
+			Mode:     ModeChat,
+		},
+	}
+
+	if _, ok := c.Get("old-model"); ok {
+		t.Fatal("Get should not return stale indexed key with a different model ID")
+	}
+}
+
+func TestCatalogGetConcurrentBuildIndex(t *testing.T) {
+	c := Catalog{
+		"new/provider-model": {
+			Provider: "new",
+			ModelID:  "same-model",
+			Mode:     ModeChat,
+		},
+	}
+	other := Catalog{
+		"old/provider-model": {
+			Provider: "old",
+			ModelID:  "same-model",
+			Mode:     ModeChat,
+		},
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			BuildIndex(other)
+		}()
+		go func() {
+			defer wg.Done()
+			if _, ok := c.Get("same-model"); !ok {
+				t.Error("Get with bare model ID should succeed during index rebuild")
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 // TestIsDeprecated checks that both "deprecated" and "legacy" statuses are
