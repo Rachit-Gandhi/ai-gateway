@@ -364,3 +364,39 @@ Build tag headers on every integration test file:
 - `go test ./internal/plugins/logger/...`
 - Prefer UTC assertions for persisted/admin timestamps.
 - For dashboard rendering, avoid `innerHTML` with API data; use DOM node creation APIs.
+
+## Cursor Cloud specific instructions
+
+### Tooling
+
+- **Go 1.25+** is required (`go.mod` pins `go 1.25.0`). The VM image may already include it; confirm with `go version`.
+- **`golangci-lint` v2.4.0** is **not** bundled with the repo. `make lint` expects it on `PATH` (CI uses v2.4.0). One-time install:
+  `curl -sSL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b "$(go env GOPATH)/bin" v2.4.0`
+  then `export PATH="$(go env GOPATH)/bin:$PATH"`.
+- **Docker** is optional for day-to-day dev. `make test-integration`’s Postgres-backed tests in `test/integration/` use testcontainers and **skip** when Docker is unavailable; `test/integration/http/`, `plugins/`, and `strategies/` always run without Docker.
+
+### Running the gateway locally
+
+| Command | Notes |
+|---------|--------|
+| `make deps` | `go mod download` + `go mod verify` |
+| `make build` | Produces `./bin/ferrogw` |
+| `make run` | Builds then runs `./bin/ferrogw` (needs at least one provider env key for chat) |
+| `./bin/ferrogw init --non-interactive` | Writes `config.yaml` and prints `MASTER_KEY` once |
+| `./bin/ferrogw serve` | Listens on **`PORT`** (default **8080**); set `MASTER_KEY` and `GATEWAY_CONFIG` |
+
+Without a provider API key (e.g. `OPENAI_API_KEY`), `GET /health` returns `"status":"no_providers"` and chat requests return `model_not_found`. That is expected.
+
+### E2E without cloud LLM keys
+
+Use the integration HTTP suite (in-process gateway + stub provider):
+
+```bash
+go test -tags=integration -race ./test/integration/http/...
+```
+
+`TestChat_NonStreaming_Success` exercises `POST /v1/chat/completions` end-to-end with no external API keys.
+
+### Long-running server
+
+Use **tmux** (not a one-shot background shell) if you need `ferrogw serve` to stay up while you run curls or manual tests, e.g. session name `ferrogw-server` on port 8080 with `MASTER_KEY` and `GATEWAY_CONFIG` exported in that pane.
