@@ -242,6 +242,22 @@ func TestCatalogGetProviderAlias(t *testing.T) {
 			ModelID:  "gemini-2.5-pro",
 			Mode:     ModeChat,
 		},
+		"azure_openai/gpt-4o-mini": {
+			Provider: "azure_openai",
+			ModelID:  "gpt-4o-mini",
+			Mode:     ModeChat,
+			Pricing: Pricing{
+				InputPerMTokens: ptrF(0.15),
+			},
+		},
+		"azure/gpt-4o-mini": {
+			Provider: "azure",
+			ModelID:  "gpt-4o-mini",
+			Mode:     ModeChat,
+			Pricing: Pricing{
+				InputPerMTokens: ptrF(0.165),
+			},
+		},
 	}
 
 	cases := []struct {
@@ -249,7 +265,7 @@ func TestCatalogGetProviderAlias(t *testing.T) {
 		provider string
 		modelID  string
 	}{
-		{"azure-openai/gpt-4o", "azure", "gpt-4o"},
+		{"azure-openai/gpt-4o-mini", "azure_openai", "gpt-4o-mini"},
 		{"azure-foundry/gpt-4o", "azure_foundry", "gpt-4o"},
 		{"vertex-ai/gemini-2.5-pro", "vertex_ai", "gemini-2.5-pro"},
 	}
@@ -327,7 +343,7 @@ func TestCatalogGetAzureFoundryPrefersFoundryCatalog(t *testing.T) {
 	}
 }
 
-func TestCatalogGetProviderAliasCaseInsensitiveEmbeddedCatalog(t *testing.T) {
+func TestCatalogGetAzureFoundryPhi4MetadataEmbeddedCatalog(t *testing.T) {
 	c, err := parse(bundledCatalog)
 	if err != nil {
 		t.Fatalf("parse bundled catalog: %v", err)
@@ -335,13 +351,49 @@ func TestCatalogGetProviderAliasCaseInsensitiveEmbeddedCatalog(t *testing.T) {
 
 	got, ok := c.Get("azure-foundry/phi-4")
 	if !ok {
-		t.Fatal("embedded catalog should resolve azure-foundry/phi-4")
+		t.Fatal("embedded catalog should resolve azure-foundry/phi-4 for metadata")
+	}
+	if got.Provider != "azure_foundry" {
+		t.Fatalf("Provider = %q, want azure_foundry", got.Provider)
+	}
+	if got.MaxOutputTokens != 4096 {
+		t.Fatalf("MaxOutputTokens = %d, want Foundry metadata (4096)", got.MaxOutputTokens)
+	}
+}
+
+func TestCatalogGetForPricingAzureFoundryPhi4EmbeddedCatalog(t *testing.T) {
+	c, err := parse(bundledCatalog)
+	if err != nil {
+		t.Fatalf("parse bundled catalog: %v", err)
+	}
+
+	got, ok := c.GetForPricing("azure-foundry/phi-4")
+	if !ok {
+		t.Fatal("embedded catalog should resolve azure-foundry/phi-4 for pricing")
 	}
 	if got.ModelID != "Phi-4" {
 		t.Fatalf("ModelID = %q, want Phi-4", got.ModelID)
 	}
 	if got.Pricing.InputPerMTokens == nil {
 		t.Fatal("expected priced azure/Phi-4 entry, not azure_foundry/phi-4 null pricing")
+	}
+}
+
+func TestCatalogGetAzureOpenAIPrefersOpenAICatalog(t *testing.T) {
+	c, err := parse(bundledCatalog)
+	if err != nil {
+		t.Fatalf("parse bundled catalog: %v", err)
+	}
+
+	got, ok := c.Get("azure-openai/gpt-4o-mini")
+	if !ok {
+		t.Fatal("embedded catalog should resolve azure-openai/gpt-4o-mini")
+	}
+	if got.Provider != "azure_openai" {
+		t.Fatalf("Provider = %q, want azure_openai", got.Provider)
+	}
+	if got.Pricing.InputPerMTokens == nil || *got.Pricing.InputPerMTokens != 0.15 {
+		t.Fatalf("input price = %v, want 0.15 from azure_openai entry", got.Pricing.InputPerMTokens)
 	}
 }
 

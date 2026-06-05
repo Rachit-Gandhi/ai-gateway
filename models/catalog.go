@@ -64,7 +64,7 @@ var (
 // billing on gpt-4o); azure/ remains for models only published there (Phi-4).
 // See https://github.com/ferro-labs/ai-gateway/issues/132
 var catalogProviderAliases = map[string][]string{
-	"azure-openai":  {"azure"},
+	"azure-openai":  {"azure_openai", "azure"},
 	"azure-foundry": {"azure_foundry", "azure"},
 	"vertex-ai":     {"vertex_ai"},
 }
@@ -228,10 +228,20 @@ func (c Catalog) lookupUnderPrefix(prefix, modelID string) (Model, bool) {
 	return c.getUnderPrefixCaseInsensitive(prefix, modelID)
 }
 
-// catalogEntryUsableForAlias reports whether a catalog hit under an alias chain
-// should be returned or skipped in favor of the next prefix. Unpriced chat rows
-// from an earlier prefix (e.g. azure_foundry/phi-4) fall through to azure/Phi-4.
-func catalogEntryUsableForAlias(m Model, morePrefixes bool) bool {
+func (c Catalog) getWithCatalogPrefixes(prefixes []string, modelID string, forPricing bool) (Model, bool) {
+	for i, prefix := range prefixes {
+		m, ok := c.lookupUnderPrefix(prefix, modelID)
+		if !ok {
+			continue
+		}
+		if !forPricing || catalogEntryUsableForPricing(m, i+1 < len(prefixes)) {
+			return m, true
+		}
+	}
+	return Model{}, false
+}
+
+func catalogEntryUsableForPricing(m Model, morePrefixes bool) bool {
 	if !morePrefixes {
 		return true
 	}
@@ -239,19 +249,6 @@ func catalogEntryUsableForAlias(m Model, morePrefixes bool) bool {
 		return true
 	}
 	return m.Pricing.InputPerMTokens != nil
-}
-
-func (c Catalog) getWithCatalogPrefixes(prefixes []string, modelID string) (Model, bool) {
-	for i, prefix := range prefixes {
-		m, ok := c.lookupUnderPrefix(prefix, modelID)
-		if !ok {
-			continue
-		}
-		if catalogEntryUsableForAlias(m, i+1 < len(prefixes)) {
-			return m, true
-		}
-	}
-	return Model{}, false
 }
 
 // getUnderPrefixCaseInsensitive finds a catalog entry whose key is
@@ -270,21 +267,38 @@ func (c Catalog) getUnderPrefixCaseInsensitive(prefix, modelID string) (Model, b
 	return Model{}, false
 }
 
-// Get looks up a model by "provider/model-id".
-// If the exact key is missing, retries with [catalogProviderAliases] when the
-// provider segment is a known gateway ID, then a case-insensitive match under
-// the aliased catalog prefix. Bare model IDs are resolved via the reverse index
-// (built at catalog load time) in O(1) instead of scanning.
+func (c Catalog) resolveAliased(key string, forPricing bool) (Model, bool) {
+	provider, modelID, ok := strings.Cut(key, "/")
+	if !ok || provider == "" || modelID == "" {
+		return Model{}, false
+	}
+	prefixes, ok := catalogProviderAliases[provider]
+	if !ok {
+		return Model{}, false
+	}
+	return c.getWithCatalogPrefixes(prefixes, modelID, forPricing)
+}
+
+// Get looks up a model by "provider/model-id" for metadata enrichment.
+// Alias resolution returns the first matching catalog row (including rows
+// without input pricing). Use [Catalog.GetForPricing] for cost calculation.
 func (c Catalog) Get(key string) (Model, bool) {
+	return c.resolve(key, false)
+}
+
+// GetForPricing looks up a model for cost calculation. Alias resolution may
+// skip unpriced chat rows on an earlier prefix in favor of a later priced row
+// (e.g. azure_foundry/phi-4 → azure/Phi-4).
+func (c Catalog) GetForPricing(key string) (Model, bool) {
+	return c.resolve(key, true)
+}
+
+func (c Catalog) resolve(key string, forPricing bool) (Model, bool) {
 	if m, ok := c[key]; ok {
 		return m, true
 	}
-	if provider, modelID, ok := strings.Cut(key, "/"); ok && provider != "" && modelID != "" {
-		if prefixes, ok := catalogProviderAliases[provider]; ok {
-			if m, ok := c.getWithCatalogPrefixes(prefixes, modelID); ok {
-				return m, true
-			}
-		}
+	if m, ok := c.resolveAliased(key, forPricing); ok {
+		return m, true
 	}
 	// Bare model ID: use the reverse index for constant-time lookup.
 	modelIDIndexMu.RLock()

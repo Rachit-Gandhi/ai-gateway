@@ -348,6 +348,35 @@ func TestCalculateProviderAliasAzureFoundryNoCacheRead(t *testing.T) {
 	}
 }
 
+func TestCalculateProviderAliasAzureOpenAIPrefersOpenAIPricing(t *testing.T) {
+	c := catalogWith("azure_openai/gpt-4o-mini", Model{
+		Provider: "azure_openai",
+		ModelID:  "gpt-4o-mini",
+		Mode:     ModeChat,
+		Pricing: Pricing{
+			InputPerMTokens:  ptr(0.15),
+			OutputPerMTokens: ptr(0.60),
+		},
+	})
+	c["azure/gpt-4o-mini"] = Model{
+		Provider: "azure",
+		ModelID:  "gpt-4o-mini",
+		Mode:     ModeChat,
+		Pricing: Pricing{
+			InputPerMTokens:  ptr(0.165),
+			OutputPerMTokens: ptr(0.66),
+		},
+	}
+
+	got := Calculate(c, "azure-openai/gpt-4o-mini", Usage{PromptTokens: 1_000_000})
+	if !got.ModelFound || !got.Priced {
+		t.Fatalf("ModelFound=%v Priced=%v", got.ModelFound, got.Priced)
+	}
+	if got.InputUSD != 0.15 {
+		t.Errorf("InputUSD: got %v, want 0.15 from azure_openai entry", got.InputUSD)
+	}
+}
+
 func TestCalculateProviderAliasCaseInsensitive(t *testing.T) {
 	c := catalogWith("azure/Phi-4", Model{
 		Provider: "azure",
