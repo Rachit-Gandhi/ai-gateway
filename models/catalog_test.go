@@ -229,24 +229,40 @@ func TestCatalogGetProviderAlias(t *testing.T) {
 		},
 	}
 
-	got, ok := c.Get("azure-openai/gpt-4o")
-	if !ok {
-		t.Fatal("Get with azure-openai alias should succeed")
+	cases := []struct {
+		key      string
+		provider string
+		modelID  string
+	}{
+		{"azure-openai/gpt-4o", "azure", "gpt-4o"},
+		{"azure-foundry/gpt-4o", "azure", "gpt-4o"},
+		{"vertex-ai/gemini-2.5-pro", "vertex_ai", "gemini-2.5-pro"},
 	}
-	if got.Provider != "azure" {
-		t.Fatalf("Provider = %q, want azure", got.Provider)
+	if len(cases) != len(catalogProviderAliases) {
+		t.Fatalf("test cases = %d, catalogProviderAliases = %d — add a case per alias",
+			len(cases), len(catalogProviderAliases))
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.key, func(t *testing.T) {
+			got, ok := c.Get(tc.key)
+			if !ok {
+				t.Fatalf("Get(%q) should succeed", tc.key)
+			}
+			if got.Provider != tc.provider || got.ModelID != tc.modelID {
+				t.Fatalf("Get(%q) = (%q,%q), want (%q,%q)",
+					tc.key, got.Provider, got.ModelID, tc.provider, tc.modelID)
+			}
+		})
 	}
 
-	got, ok = c.Get("vertex-ai/gemini-2.5-pro")
-	if !ok {
-		t.Fatal("Get with vertex-ai alias should succeed")
-	}
-	if got.ModelID != "gemini-2.5-pro" {
-		t.Fatalf("ModelID = %q, want gemini-2.5-pro", got.ModelID)
-	}
-
-	if _, ok := c.Get("azure-openai/unknown-model"); ok {
-		t.Error("Get should not succeed for unknown model even with alias")
+	for gatewayID := range catalogProviderAliases {
+		gatewayID := gatewayID
+		t.Run(gatewayID+"/unknown", func(t *testing.T) {
+			if _, ok := c.Get(gatewayID + "/unknown-model"); ok {
+				t.Fatalf("Get(%q/unknown-model) should not succeed", gatewayID)
+			}
+		})
 	}
 }
 
