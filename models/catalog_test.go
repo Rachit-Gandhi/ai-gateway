@@ -216,11 +216,26 @@ func TestCatalogGet(t *testing.T) {
 }
 
 func TestCatalogGetProviderAlias(t *testing.T) {
+	cacheRead := 1.25
 	c := Catalog{
 		"azure/gpt-4o": {
 			Provider: "azure",
 			ModelID:  "gpt-4o",
 			Mode:     ModeChat,
+			Pricing: Pricing{
+				InputPerMTokens:     ptrF(2.5),
+				CacheReadPerMTokens: &cacheRead,
+			},
+			Capabilities: Capabilities{PromptCaching: true},
+		},
+		"azure_foundry/gpt-4o": {
+			Provider: "azure_foundry",
+			ModelID:  "gpt-4o",
+			Mode:     ModeChat,
+			Pricing: Pricing{
+				InputPerMTokens: ptrF(2.5),
+			},
+			Capabilities: Capabilities{PromptCaching: false},
 		},
 		"vertex_ai/gemini-2.5-pro": {
 			Provider: "vertex_ai",
@@ -235,7 +250,7 @@ func TestCatalogGetProviderAlias(t *testing.T) {
 		modelID  string
 	}{
 		{"azure-openai/gpt-4o", "azure", "gpt-4o"},
-		{"azure-foundry/gpt-4o", "azure", "gpt-4o"},
+		{"azure-foundry/gpt-4o", "azure_foundry", "gpt-4o"},
 		{"vertex-ai/gemini-2.5-pro", "vertex_ai", "gemini-2.5-pro"},
 	}
 	if len(cases) != len(catalogProviderAliases) {
@@ -288,6 +303,27 @@ func TestCatalogGetProviderAliasCaseInsensitive(t *testing.T) {
 	}
 	if got.Pricing.InputPerMTokens == nil || *got.Pricing.InputPerMTokens != 0.125 {
 		t.Fatalf("expected priced azure/Phi-4 entry, got %+v", got.Pricing)
+	}
+}
+
+func TestCatalogGetAzureFoundryPrefersFoundryCatalog(t *testing.T) {
+	c, err := parse(bundledCatalog)
+	if err != nil {
+		t.Fatalf("parse bundled catalog: %v", err)
+	}
+
+	got, ok := c.Get("azure-foundry/gpt-4o")
+	if !ok {
+		t.Fatal("embedded catalog should resolve azure-foundry/gpt-4o")
+	}
+	if got.Provider != "azure_foundry" {
+		t.Fatalf("Provider = %q, want azure_foundry", got.Provider)
+	}
+	if got.Capabilities.PromptCaching {
+		t.Fatal("expected azure_foundry/gpt-4o entry without prompt caching")
+	}
+	if got.Pricing.CacheReadPerMTokens != nil {
+		t.Fatal("expected azure_foundry entry without cache-read pricing")
 	}
 }
 

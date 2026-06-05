@@ -317,6 +317,37 @@ func TestCalculateProviderAlias(t *testing.T) {
 	}
 }
 
+func TestCalculateProviderAliasAzureFoundryNoCacheRead(t *testing.T) {
+	c := catalogWith("azure/gpt-4o", Model{
+		Provider: "azure",
+		ModelID:  "gpt-4o",
+		Mode:     ModeChat,
+		Pricing: Pricing{
+			InputPerMTokens:     ptr(2.5),
+			CacheReadPerMTokens: ptr(1.25),
+		},
+	})
+	c["azure_foundry/gpt-4o"] = Model{
+		Provider: "azure_foundry",
+		ModelID:  "gpt-4o",
+		Mode:     ModeChat,
+		Pricing: Pricing{
+			InputPerMTokens: ptr(2.5),
+		},
+	}
+
+	got := Calculate(c, "azure-foundry/gpt-4o", Usage{
+		PromptTokens:    1_000_000,
+		CacheReadTokens: 500_000,
+	})
+	if !got.ModelFound || !got.Priced {
+		t.Fatalf("ModelFound=%v Priced=%v", got.ModelFound, got.Priced)
+	}
+	if got.CacheReadUSD != 0 {
+		t.Errorf("CacheReadUSD: got %v, want 0 when using azure_foundry entry", got.CacheReadUSD)
+	}
+}
+
 func TestCalculateProviderAliasCaseInsensitive(t *testing.T) {
 	c := catalogWith("azure/Phi-4", Model{
 		Provider: "azure",

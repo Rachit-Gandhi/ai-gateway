@@ -58,14 +58,15 @@ var (
 	modelIDIndex   map[string]string
 )
 
-// catalogProviderAliases maps gateway provider IDs to catalog key prefixes.
-// The model-catalog artifact uses short prefixes (azure, vertex_ai) while
-// gateway providers keep hyphenated public names (azure-openai, vertex-ai).
+// catalogProviderAliases maps gateway provider IDs to catalog key prefixes,
+// in priority order. Azure Foundry tries azure_foundry/ before azure/ so
+// metadata and pricing match the Foundry catalog entries (e.g. no prompt-cache
+// billing on gpt-4o); azure/ remains for models only published there (Phi-4).
 // See https://github.com/ferro-labs/ai-gateway/issues/132
-var catalogProviderAliases = map[string]string{
-	"azure-openai":  "azure",
-	"azure-foundry": "azure",
-	"vertex-ai":     "vertex_ai",
+var catalogProviderAliases = map[string][]string{
+	"azure-openai":  {"azure"},
+	"azure-foundry": {"azure_foundry", "azure"},
+	"vertex-ai":     {"vertex_ai"},
 }
 
 // BuildIndex constructs the reverse modelID → key index for a catalog that
@@ -219,16 +220,38 @@ func parse(data []byte) (Catalog, error) {
 	return c, nil
 }
 
-func catalogKeyWithProviderAlias(key string) (string, bool) {
-	provider, modelID, ok := strings.Cut(key, "/")
-	if !ok || provider == "" || modelID == "" {
-		return "", false
+func (c Catalog) lookupUnderPrefix(prefix, modelID string) (Model, bool) {
+	key := prefix + "/" + modelID
+	if m, ok := c[key]; ok {
+		return m, true
 	}
-	alias, ok := catalogProviderAliases[provider]
-	if !ok {
-		return "", false
+	return c.getUnderPrefixCaseInsensitive(prefix, modelID)
+}
+
+// catalogEntryUsableForAlias reports whether a catalog hit under an alias chain
+// should be returned or skipped in favor of the next prefix. Unpriced chat rows
+// from an earlier prefix (e.g. azure_foundry/phi-4) fall through to azure/Phi-4.
+func catalogEntryUsableForAlias(m Model, morePrefixes bool) bool {
+	if !morePrefixes {
+		return true
 	}
-	return alias + "/" + modelID, true
+	if m.Mode != ModeChat {
+		return true
+	}
+	return m.Pricing.InputPerMTokens != nil
+}
+
+func (c Catalog) getWithCatalogPrefixes(prefixes []string, modelID string) (Model, bool) {
+	for i, prefix := range prefixes {
+		m, ok := c.lookupUnderPrefix(prefix, modelID)
+		if !ok {
+			continue
+		}
+		if catalogEntryUsableForAlias(m, i+1 < len(prefixes)) {
+			return m, true
+		}
+	}
+	return Model{}, false
 }
 
 // getUnderPrefixCaseInsensitive finds a catalog entry whose key is
@@ -256,12 +279,9 @@ func (c Catalog) Get(key string) (Model, bool) {
 	if m, ok := c[key]; ok {
 		return m, true
 	}
-	if aliased, ok := catalogKeyWithProviderAlias(key); ok {
-		if m, ok := c[aliased]; ok {
-			return m, true
-		}
-		if prefix, modelID, ok := strings.Cut(aliased, "/"); ok && prefix != "" && modelID != "" {
-			if m, ok := c.getUnderPrefixCaseInsensitive(prefix, modelID); ok {
+	if provider, modelID, ok := strings.Cut(key, "/"); ok && provider != "" && modelID != "" {
+		if prefixes, ok := catalogProviderAliases[provider]; ok {
+			if m, ok := c.getWithCatalogPrefixes(prefixes, modelID); ok {
 				return m, true
 			}
 		}
