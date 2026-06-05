@@ -215,6 +215,41 @@ func TestCatalogGet(t *testing.T) {
 	}
 }
 
+func TestCatalogGetProviderAlias(t *testing.T) {
+	c := Catalog{
+		"azure/gpt-4o": {
+			Provider: "azure",
+			ModelID:  "gpt-4o",
+			Mode:     ModeChat,
+		},
+		"vertex_ai/gemini-2.5-pro": {
+			Provider: "vertex_ai",
+			ModelID:  "gemini-2.5-pro",
+			Mode:     ModeChat,
+		},
+	}
+
+	got, ok := c.Get("azure-openai/gpt-4o")
+	if !ok {
+		t.Fatal("Get with azure-openai alias should succeed")
+	}
+	if got.Provider != "azure" {
+		t.Fatalf("Provider = %q, want azure", got.Provider)
+	}
+
+	got, ok = c.Get("vertex-ai/gemini-2.5-pro")
+	if !ok {
+		t.Fatal("Get with vertex-ai alias should succeed")
+	}
+	if got.ModelID != "gemini-2.5-pro" {
+		t.Fatalf("ModelID = %q, want gemini-2.5-pro", got.ModelID)
+	}
+
+	if _, ok := c.Get("azure-openai/unknown-model"); ok {
+		t.Error("Get should not succeed for unknown model even with alias")
+	}
+}
+
 func TestCatalogGetDirectCatalogFallsBackToScan(t *testing.T) {
 	BuildIndex(Catalog{})
 	c := Catalog{

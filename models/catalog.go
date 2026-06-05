@@ -58,6 +58,16 @@ var (
 	modelIDIndex   map[string]string
 )
 
+// catalogProviderAliases maps gateway provider IDs to catalog key prefixes.
+// The model-catalog artifact uses short prefixes (azure, vertex_ai) while
+// gateway providers keep hyphenated public names (azure-openai, vertex-ai).
+// See https://github.com/ferro-labs/ai-gateway/issues/132
+var catalogProviderAliases = map[string]string{
+	"azure-openai":  "azure",
+	"azure-foundry": "azure",
+	"vertex-ai":     "vertex_ai",
+}
+
 // BuildIndex constructs the reverse modelID → key index for a catalog that
 // was not loaded through [Load] or [parse] (e.g. in tests). Calling this
 // is unnecessary when the catalog comes from [Load].
@@ -209,12 +219,30 @@ func parse(data []byte) (Catalog, error) {
 	return c, nil
 }
 
+func catalogKeyWithProviderAlias(key string) (string, bool) {
+	provider, modelID, ok := strings.Cut(key, "/")
+	if !ok || provider == "" || modelID == "" {
+		return "", false
+	}
+	alias, ok := catalogProviderAliases[provider]
+	if !ok {
+		return "", false
+	}
+	return alias + "/" + modelID, true
+}
+
 // Get looks up a model by "provider/model-id".
-// If not found, uses the reverse index (built at catalog load time) to
-// resolve a bare model ID in O(1) instead of scanning all entries.
+// If the exact key is missing, retries with [catalogProviderAliases] when the
+// provider segment is a known gateway ID. Bare model IDs are resolved via the
+// reverse index (built at catalog load time) in O(1) instead of scanning.
 func (c Catalog) Get(key string) (Model, bool) {
 	if m, ok := c[key]; ok {
 		return m, true
+	}
+	if aliased, ok := catalogKeyWithProviderAlias(key); ok {
+		if m, ok := c[aliased]; ok {
+			return m, true
+		}
 	}
 	// Bare model ID: use the reverse index for constant-time lookup.
 	modelIDIndexMu.RLock()

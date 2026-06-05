@@ -101,9 +101,6 @@ func catalogCoverageValue(configKey string) string {
 
 func catalogCoverageExcluded(providerID string) bool {
 	switch providerID {
-	case providers.NameAzureFoundry, providers.NameAzureOpenAI, providers.NameVertexAI:
-		// Azure and Vertex prefix drift is tracked separately by #132.
-		return true
 	case providers.NameHuggingFace, providers.NameNVIDIANIM, providers.NameQwen:
 		// These provider packages exist, but the embedded catalog currently has no
 		// matching top-level provider prefix for their direct API provider names.

@@ -294,6 +294,29 @@ func TestCalculateModelNotFound(t *testing.T) {
 	}
 }
 
+func TestCalculateProviderAlias(t *testing.T) {
+	c := catalogWith("azure/gpt-4o", Model{
+		Provider: "azure",
+		ModelID:  "gpt-4o",
+		Mode:     ModeChat,
+		Pricing: Pricing{
+			InputPerMTokens:  ptr(2.5),
+			OutputPerMTokens: ptr(10.0),
+		},
+	})
+
+	got := Calculate(c, "azure-openai/gpt-4o", Usage{PromptTokens: 1_000_000})
+	if !got.ModelFound {
+		t.Fatal("ModelFound should be true for azure-openai alias")
+	}
+	if !got.Priced {
+		t.Fatal("Priced should be true")
+	}
+	if got.InputUSD != 2.5 {
+		t.Errorf("InputUSD: got %v, want 2.5", got.InputUSD)
+	}
+}
+
 // Bare model ID (no provider prefix) should resolve via reverse index.
 func TestCalculateBareModelID(t *testing.T) {
 	c := catalogWith("openai/gpt-4o-mini", Model{
