@@ -266,6 +266,51 @@ func TestCatalogGetProviderAlias(t *testing.T) {
 	}
 }
 
+func TestCatalogGetProviderAliasCaseInsensitive(t *testing.T) {
+	c := Catalog{
+		"azure/Phi-4": {
+			Provider: "azure",
+			ModelID:  "Phi-4",
+			Mode:     ModeChat,
+			Pricing: Pricing{
+				InputPerMTokens:  ptrF(0.125),
+				OutputPerMTokens: ptrF(0.5),
+			},
+		},
+	}
+
+	got, ok := c.Get("azure-foundry/phi-4")
+	if !ok {
+		t.Fatal("Get(azure-foundry/phi-4) should succeed via case-insensitive alias")
+	}
+	if got.ModelID != "Phi-4" {
+		t.Fatalf("ModelID = %q, want Phi-4", got.ModelID)
+	}
+	if got.Pricing.InputPerMTokens == nil || *got.Pricing.InputPerMTokens != 0.125 {
+		t.Fatalf("expected priced azure/Phi-4 entry, got %+v", got.Pricing)
+	}
+}
+
+func TestCatalogGetProviderAliasCaseInsensitiveEmbeddedCatalog(t *testing.T) {
+	c, err := parse(bundledCatalog)
+	if err != nil {
+		t.Fatalf("parse bundled catalog: %v", err)
+	}
+
+	got, ok := c.Get("azure-foundry/phi-4")
+	if !ok {
+		t.Fatal("embedded catalog should resolve azure-foundry/phi-4")
+	}
+	if got.ModelID != "Phi-4" {
+		t.Fatalf("ModelID = %q, want Phi-4", got.ModelID)
+	}
+	if got.Pricing.InputPerMTokens == nil {
+		t.Fatal("expected priced azure/Phi-4 entry, not azure_foundry/phi-4 null pricing")
+	}
+}
+
+func ptrF(v float64) *float64 { return &v }
+
 func TestCatalogGetDirectCatalogFallsBackToScan(t *testing.T) {
 	BuildIndex(Catalog{})
 	c := Catalog{

@@ -26,14 +26,23 @@ func TestCatalogBackupCoversRegisteredProviders(t *testing.T) {
 		if len(models) == 0 {
 			t.Fatalf("provider %s returned no supported models", entry.ID)
 		}
-		sampleModel := catalogCoverageSampleModel(provider.Name(), models)
-		if !provider.SupportsModel(sampleModel) {
-			t.Fatalf("provider %s does not support catalog coverage sample %q", provider.Name(), sampleModel)
-		}
-		if _, ok := catalog.Get(provider.Name() + "/" + sampleModel); !ok {
-			t.Fatalf("catalog_backup.json does not resolve provider sample %s/%s", provider.Name(), sampleModel)
+		samples := catalogCoverageSampleModels(provider.Name(), models)
+		for _, sampleModel := range samples {
+			if !provider.SupportsModel(sampleModel) {
+				t.Fatalf("provider %s does not support catalog coverage sample %q", provider.Name(), sampleModel)
+			}
+			if _, ok := catalog.Get(provider.Name() + "/" + sampleModel); !ok {
+				t.Fatalf("catalog_backup.json does not resolve provider sample %s/%s", provider.Name(), sampleModel)
+			}
 		}
 	}
+}
+
+func catalogCoverageSampleModels(providerName string, models []string) []string {
+	if _, ok := catalogProviderAliases[providerName]; ok {
+		return models
+	}
+	return []string{catalogCoverageSampleModel(providerName, models)}
 }
 
 func catalogCoverageSampleModel(providerName string, models []string) string {

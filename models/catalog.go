@@ -231,10 +231,27 @@ func catalogKeyWithProviderAlias(key string) (string, bool) {
 	return alias + "/" + modelID, true
 }
 
+// getUnderPrefixCaseInsensitive finds a catalog entry whose key is
+// prefix+"/"+modelID, comparing the model segment with strings.EqualFold.
+// Used after an aliased exact-key miss (e.g. azure/phi-4 → azure/Phi-4).
+func (c Catalog) getUnderPrefixCaseInsensitive(prefix, modelID string) (Model, bool) {
+	prefixKey := prefix + "/"
+	for k, m := range c {
+		if !strings.HasPrefix(k, prefixKey) {
+			continue
+		}
+		if strings.EqualFold(strings.TrimPrefix(k, prefixKey), modelID) {
+			return m, true
+		}
+	}
+	return Model{}, false
+}
+
 // Get looks up a model by "provider/model-id".
 // If the exact key is missing, retries with [catalogProviderAliases] when the
-// provider segment is a known gateway ID. Bare model IDs are resolved via the
-// reverse index (built at catalog load time) in O(1) instead of scanning.
+// provider segment is a known gateway ID, then a case-insensitive match under
+// the aliased catalog prefix. Bare model IDs are resolved via the reverse index
+// (built at catalog load time) in O(1) instead of scanning.
 func (c Catalog) Get(key string) (Model, bool) {
 	if m, ok := c[key]; ok {
 		return m, true
@@ -242,6 +259,11 @@ func (c Catalog) Get(key string) (Model, bool) {
 	if aliased, ok := catalogKeyWithProviderAlias(key); ok {
 		if m, ok := c[aliased]; ok {
 			return m, true
+		}
+		if prefix, modelID, ok := strings.Cut(aliased, "/"); ok && prefix != "" && modelID != "" {
+			if m, ok := c.getUnderPrefixCaseInsensitive(prefix, modelID); ok {
+				return m, true
+			}
 		}
 	}
 	// Bare model ID: use the reverse index for constant-time lookup.

@@ -317,6 +317,29 @@ func TestCalculateProviderAlias(t *testing.T) {
 	}
 }
 
+func TestCalculateProviderAliasCaseInsensitive(t *testing.T) {
+	c := catalogWith("azure/Phi-4", Model{
+		Provider: "azure",
+		ModelID:  "Phi-4",
+		Mode:     ModeChat,
+		Pricing: Pricing{
+			InputPerMTokens:  ptr(0.125),
+			OutputPerMTokens: ptr(0.5),
+		},
+	})
+
+	got := Calculate(c, "azure-foundry/phi-4", Usage{PromptTokens: 1_000_000})
+	if !got.ModelFound {
+		t.Fatal("ModelFound should be true for azure-foundry/phi-4 alias")
+	}
+	if !got.Priced {
+		t.Fatal("Priced should be true")
+	}
+	if got.InputUSD != 0.125 {
+		t.Errorf("InputUSD: got %v, want 0.125", got.InputUSD)
+	}
+}
+
 // Bare model ID (no provider prefix) should resolve via reverse index.
 func TestCalculateBareModelID(t *testing.T) {
 	c := catalogWith("openai/gpt-4o-mini", Model{
