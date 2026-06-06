@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -57,11 +58,15 @@ type mockStreamProvider struct {
 	mockProvider
 	streamErr error
 	streamCh  <-chan providers.StreamChunk
+	streamFn  func(context.Context, providers.Request) (<-chan providers.StreamChunk, error)
 }
 
-func (m *mockStreamProvider) CompleteStream(_ context.Context, _ providers.Request) (<-chan providers.StreamChunk, error) {
+func (m *mockStreamProvider) CompleteStream(ctx context.Context, req providers.Request) (<-chan providers.StreamChunk, error) {
 	if m.streamErr != nil {
 		return nil, m.streamErr
+	}
+	if m.streamFn != nil {
+		return m.streamFn(ctx, req)
 	}
 	if m.streamCh != nil {
 		return m.streamCh, nil
@@ -228,6 +233,202 @@ func TestGateway_Route_NoTargets(t *testing.T) {
 	}
 }
 
+func TestGateway_RouteStream_ContentBasedPromptRegex(t *testing.T) {
+	gw, err := New(Config{
+		Strategy: StrategyConfig{
+			Mode: ModeContentBased,
+			ContentConditions: []ContentCondition{{
+				Type:      "prompt_regex",
+				Value:     `(?i)\b(code|function)\b`,
+				TargetKey: "code-stream",
+			}},
+		},
+		Targets: []Target{
+			{VirtualKey: "general-stream"},
+			{VirtualKey: "code-stream"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gw.streamingContent) != 1 || gw.streamingContent[0].re == nil {
+		t.Fatal("expected compiled streaming content regex")
+	}
+
+	selected := make(chan string, 2)
+	recordStream := func(name string) func(context.Context, providers.Request) (<-chan providers.StreamChunk, error) {
+		return func(context.Context, providers.Request) (<-chan providers.StreamChunk, error) {
+			selected <- name
+			ch := make(chan providers.StreamChunk)
+			close(ch)
+			return ch, nil
+		}
+	}
+	gw.RegisterProvider(&mockStreamProvider{
+		mockProvider: mockProvider{
+			name:   "general-stream",
+			models: []string{"gpt-4o"},
+		},
+		streamFn: recordStream("general-stream"),
+	})
+	gw.RegisterProvider(&mockStreamProvider{
+		mockProvider: mockProvider{
+			name:   "code-stream",
+			models: []string{"gpt-4o"},
+		},
+		streamFn: recordStream("code-stream"),
+	})
+
+	out, err := gw.RouteStream(context.Background(), providers.Request{
+		Model:    "gpt-4o",
+		Stream:   true,
+		Messages: []providers.Message{{Role: "user", Content: "write a Go function"}},
+	})
+	if err != nil {
+		t.Fatalf("RouteStream: %v", err)
+	}
+	for range out { //nolint:revive
+	}
+
+	select {
+	case got := <-selected:
+		if got != "code-stream" {
+			t.Fatalf("selected provider = %q, want code-stream", got)
+		}
+	default:
+		t.Fatal("stream provider was not selected")
+	}
+}
+
+func TestGateway_NewRejectsInvalidStreamingPromptRegex(t *testing.T) {
+	_, err := New(Config{
+		Strategy: StrategyConfig{
+			Mode: ModeContentBased,
+			ContentConditions: []ContentCondition{{
+				Type:      "prompt_regex",
+				Value:     `[invalid`,
+				TargetKey: "code-stream",
+			}},
+		},
+		Targets: []Target{{VirtualKey: "code-stream"}},
+	})
+	if err == nil {
+		t.Fatal("expected invalid regex error")
+	}
+	if !strings.Contains(err.Error(), "invalid regex") {
+		t.Fatalf("error = %v, want invalid regex", err)
+	}
+}
+
+func TestGateway_ReloadConfigRejectsInvalidStreamingPromptRegex(t *testing.T) {
+	gw, err := New(Config{
+		Strategy: StrategyConfig{
+			Mode: ModeContentBased,
+			ContentConditions: []ContentCondition{{
+				Type:      "prompt_regex",
+				Value:     `docs`,
+				TargetKey: "general-stream",
+			}},
+		},
+		Targets: []Target{{VirtualKey: "general-stream"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = gw.ReloadConfig(Config{
+		Strategy: StrategyConfig{
+			Mode: ModeContentBased,
+			ContentConditions: []ContentCondition{{
+				Type:      "prompt_regex",
+				Value:     `[invalid`,
+				TargetKey: "general-stream",
+			}},
+		},
+		Targets: []Target{{VirtualKey: "general-stream"}},
+	})
+	if err == nil {
+		t.Fatal("expected invalid regex error")
+	}
+	if !strings.Contains(err.Error(), "invalid regex") {
+		t.Fatalf("error = %v, want invalid regex", err)
+	}
+	if len(gw.streamingContent) != 1 {
+		t.Fatalf("streaming content = %d, want previous config to remain", len(gw.streamingContent))
+	}
+	if gw.streamingContent[0].Value != "docs" || gw.streamingContent[0].re == nil {
+		t.Fatalf("streaming content was replaced after invalid reload: %#v", gw.streamingContent[0])
+	}
+}
+
+func TestGateway_ReloadConfigRebuildsStreamingContentRegex(t *testing.T) {
+	gw, err := New(Config{
+		Strategy: StrategyConfig{Mode: ModeSingle},
+		Targets:  []Target{{VirtualKey: "general-stream"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gw.streamingContent) != 0 {
+		t.Fatalf("single strategy streaming content = %d, want 0", len(gw.streamingContent))
+	}
+
+	err = gw.ReloadConfig(Config{
+		Strategy: StrategyConfig{
+			Mode: ModeContentBased,
+			ContentConditions: []ContentCondition{
+				{Type: "prompt_contains", Value: "docs", TargetKey: "general-stream"},
+				{Type: "prompt_regex", Value: `(?i)\b(code|function)\b`, TargetKey: "code-stream"},
+			},
+		},
+		Targets: []Target{
+			{VirtualKey: "general-stream"},
+			{VirtualKey: "code-stream"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ReloadConfig: %v", err)
+	}
+	if len(gw.streamingContent) != 2 {
+		t.Fatalf("streaming content = %d, want 2", len(gw.streamingContent))
+	}
+	if gw.streamingContent[0].re != nil {
+		t.Fatal("prompt_contains rule should not have a compiled regex")
+	}
+	if gw.streamingContent[1].re == nil {
+		t.Fatal("prompt_regex rule should have a compiled regex")
+	}
+}
+
+func TestStreamingContentConditionMatchesPromptRegexRequiresCompiledRegex(t *testing.T) {
+	req := providers.Request{
+		Messages: []providers.Message{{Role: "user", Content: "write docs"}},
+	}
+
+	if streamingContentConditionMatches(streamingContentCondition{
+		ContentCondition: ContentCondition{Type: "prompt_regex", Value: "docs"},
+	}, req) {
+		t.Fatal("uncompiled prompt_regex should not match")
+	}
+
+	compiled, err := compileStreamingContentConditions(ModeContentBased, []ContentCondition{{
+		Type:      "prompt_regex",
+		Value:     "docs",
+		TargetKey: "general-stream",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !streamingContentConditionMatches(compiled[0], req) {
+		t.Fatal("compiled prompt_regex should match")
+	}
+	if streamingContentConditionMatches(streamingContentCondition{
+		ContentCondition: ContentCondition{Type: "unknown", Value: "docs"},
+	}, req) {
+		t.Fatal("unknown streaming content condition should not match")
+	}
+}
+
 func TestGateway_RouteStream_ImmediateFailure_IncrementsProviderErrors(t *testing.T) {
 	gw, _ := New(Config{
 		Strategy: StrategyConfig{Mode: ModeSingle},
@@ -331,6 +532,473 @@ func TestGatewayClose_IsIdempotent(t *testing.T) {
 	if err := gw.Close(); err != nil {
 		t.Fatalf("second Close: %v", err)
 	}
+}
+
+// gateMockProvider blocks in Complete until release is closed, so tests can
+// overlap provider execution with Gateway.Close().
+type gateMockProvider struct {
+	mockProvider
+	release     chan struct{}
+	active      atomic.Int32
+	releaseOnce sync.Once
+}
+
+func newGateMockProvider(resp *providers.Response, err error) *gateMockProvider {
+	return &gateMockProvider{
+		mockProvider: mockProvider{
+			name:   "gate",
+			models: []string{"gpt-4o"},
+			resp:   resp,
+			err:    err,
+		},
+		release: make(chan struct{}),
+	}
+}
+
+func (p *gateMockProvider) Complete(_ context.Context, _ providers.Request) (*providers.Response, error) {
+	p.active.Add(1)
+	<-p.release
+	if p.err != nil {
+		return nil, p.err
+	}
+	if p.resp == nil {
+		return nil, nil
+	}
+	resp := *p.resp
+	return &resp, nil
+}
+
+func (p *gateMockProvider) releaseAll() {
+	p.releaseOnce.Do(func() { close(p.release) })
+}
+
+func (p *gateMockProvider) waitActive(t *testing.T, want int32) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for p.active.Load() < want {
+		if time.Now().After(deadline) {
+			t.Fatalf("active routes = %d, want %d", p.active.Load(), want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// gateStreamProvider blocks before emitting stream chunks until release closes.
+type gateStreamProvider struct {
+	mockStreamProvider
+	enterOnce sync.Once
+	enter     chan struct{}
+	release   chan struct{}
+}
+
+func newGateStreamProvider() *gateStreamProvider {
+	return &gateStreamProvider{
+		mockStreamProvider: mockStreamProvider{
+			mockProvider: mockProvider{
+				name:   "gate-stream",
+				models: []string{"gpt-4o"},
+			},
+		},
+		enter:   make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (p *gateStreamProvider) CompleteStream(_ context.Context, _ providers.Request) (<-chan providers.StreamChunk, error) {
+	ch := make(chan providers.StreamChunk, 1)
+	go func() {
+		p.enterOnce.Do(func() { close(p.enter) })
+		<-p.release
+		ch <- providers.StreamChunk{
+			ID:     "stream-1",
+			Object: "chat.completion.chunk",
+			Model:  "gpt-4o",
+			Choices: []providers.StreamChoice{{
+				Index: 0,
+				Delta: providers.MessageDelta{Role: "assistant", Content: "hi"},
+			}},
+		}
+		close(ch)
+	}()
+	return ch, nil
+}
+
+func completedHookEvent(traceID string) events.HookEvent {
+	return events.CompletedRequest(
+		traceID,
+		"mock",
+		"gpt-4o",
+		time.Millisecond,
+		false,
+		1,
+		1,
+		models.CostResult{},
+		true,
+	)
+}
+
+func runWithPanicCapture(t *testing.T, fn func()) any {
+	t.Helper()
+	done := make(chan any, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				done <- r
+				return
+			}
+			done <- nil
+		}()
+		fn()
+	}()
+
+	select {
+	case r := <-done:
+		return r
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for goroutine")
+		return nil
+	}
+}
+
+func newHookedGateway(t *testing.T, provider providers.Provider) (*Gateway, *gateMockProvider) {
+	t.Helper()
+	gw, err := New(Config{
+		Strategy: StrategyConfig{Mode: ModeSingle},
+		Targets:  []Target{{VirtualKey: provider.Name()}},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gate, ok := provider.(*gateMockProvider)
+	if !ok {
+		t.Fatalf("provider must be *gateMockProvider, got %T", provider)
+	}
+	gw.RegisterProvider(gate)
+	gw.AddHook(func(context.Context, string, map[string]interface{}) {})
+	return gw, gate
+}
+
+func TestGateway_Close_DuringInFlightRouteDoesNotPanic(t *testing.T) {
+	provider := newGateMockProvider(&providers.Response{ID: "ok", Model: "gpt-4o"}, nil)
+	gw, gate := newHookedGateway(t, provider)
+
+	routeDone := make(chan error, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				routeDone <- fmt.Errorf("panic: %v", r)
+			}
+		}()
+		_, err := gw.Route(context.Background(), providers.Request{
+			Model:    "gpt-4o",
+			Messages: []providers.Message{{Role: "user", Content: "hi"}},
+		})
+		routeDone <- err
+	}()
+
+	gate.waitActive(t, 1)
+	if err := gw.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	gate.releaseAll()
+
+	select {
+	case err := <-routeDone:
+		if err != nil {
+			t.Fatalf("Route failed during shutdown: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for in-flight route")
+	}
+}
+
+func TestGateway_Close_DuringInFlightRouteStreamDoesNotPanic(t *testing.T) {
+	gw, err := New(Config{
+		Strategy: StrategyConfig{Mode: ModeSingle},
+		Targets:  []Target{{VirtualKey: "gate-stream"}},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	streamProvider := newGateStreamProvider()
+	gw.RegisterProvider(streamProvider)
+	gw.AddHook(func(context.Context, string, map[string]interface{}) {})
+
+	routeDone := make(chan any, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				routeDone <- r
+				return
+			}
+			routeDone <- nil
+		}()
+		ch, err := gw.RouteStream(context.Background(), providers.Request{
+			Model:    "gpt-4o",
+			Messages: []providers.Message{{Role: "user", Content: "hi"}},
+			Stream:   true,
+		})
+		if err != nil {
+			routeDone <- err
+			return
+		}
+		// Drain the stream.
+		//nolint:revive // intentionally draining the stream channel to completion
+		for range ch {
+		}
+		routeDone <- nil
+	}()
+
+	select {
+	case <-streamProvider.enter:
+	case <-time.After(time.Second):
+		t.Fatal("stream provider never started")
+	}
+
+	if err := gw.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	close(streamProvider.release)
+
+	select {
+	case result := <-routeDone:
+		if result != nil {
+			t.Fatalf("RouteStream failed or panicked: %v", result)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for stream route to finish")
+	}
+}
+
+func TestGateway_Close_DuringFailedRouteDoesNotPanic(t *testing.T) {
+	provider := newGateMockProvider(nil, fmt.Errorf("provider down"))
+	gw, gate := newHookedGateway(t, provider)
+
+	routeDone := make(chan error, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				routeDone <- fmt.Errorf("panic: %v", r)
+			}
+		}()
+		_, err := gw.Route(context.Background(), providers.Request{
+			Model:    "gpt-4o",
+			Messages: []providers.Message{{Role: "user", Content: "hi"}},
+		})
+		routeDone <- err
+	}()
+
+	gate.waitActive(t, 1)
+	if err := gw.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	gate.releaseAll()
+
+	select {
+	case err := <-routeDone:
+		if err == nil {
+			t.Fatal("expected route error, got nil")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for failed route")
+	}
+}
+
+func TestGateway_PublishEvent_AfterCloseDoesNotPanic(t *testing.T) {
+	gw, err := New(Config{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw.AddHook(func(context.Context, string, map[string]interface{}) {})
+
+	if err := gw.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if p := runWithPanicCapture(t, func() {
+		gw.publishEvent(context.Background(), completedHookEvent("trace-after-close"))
+	}); p != nil {
+		t.Fatalf("publishEvent panicked after Close: %v", p)
+	}
+}
+
+func TestGateway_PublishEvent_AfterShutdownWithFullQueueDoesNotPanic(t *testing.T) {
+	gw := &Gateway{
+		hookDispatchQ: make(chan hookDispatch, 1),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	gw.shutdownCtx = ctx
+	gw.shutdownCancel = cancel
+	gw.hookSnapshot.Store([]EventHookFunc{
+		func(context.Context, string, map[string]interface{}) {},
+		func(context.Context, string, map[string]interface{}) {},
+	})
+	gw.startHookWorkers()
+	t.Cleanup(cancel)
+
+	// Fill the queue so the next publishEvent hits the default branch.
+	gw.publishEvent(context.Background(), completedHookEvent("trace-fill"))
+
+	gw.shutdownCancel()
+
+	if p := runWithPanicCapture(t, func() {
+		gw.publishEvent(context.Background(), completedHookEvent("trace-shutdown-full"))
+	}); p != nil {
+		t.Fatalf("publishEvent panicked after shutdown with full queue: %v", p)
+	}
+}
+
+func TestGateway_Close_ConcurrentPublishEventStress(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping concurrent hook shutdown stress in -short")
+	}
+
+	gw, err := New(Config{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw.AddHook(func(context.Context, string, map[string]interface{}) {
+		time.Sleep(2 * time.Millisecond)
+	})
+
+	const publishers = 32
+	panicCh := make(chan any, publishers)
+	var wg sync.WaitGroup
+	for range publishers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					panicCh <- r
+				}
+			}()
+			for range 50 {
+				gw.publishEvent(context.Background(), completedHookEvent("trace-stress"))
+			}
+		}()
+	}
+
+	time.Sleep(5 * time.Millisecond)
+	if err := gw.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	wg.Wait()
+	close(panicCh)
+	for p := range panicCh {
+		t.Fatalf("concurrent publishEvent panicked during Close: %v", p)
+	}
+}
+
+func TestGateway_Close_DuringConcurrentRoutesDoesNotPanic(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping concurrent route shutdown stress in -short")
+	}
+
+	gw, err := New(Config{
+		Strategy: StrategyConfig{Mode: ModeSingle},
+		Targets:  []Target{{VirtualKey: "gate"}},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	provider := newGateMockProvider(&providers.Response{ID: "ok", Model: "gpt-4o"}, nil)
+	gw.RegisterProvider(provider)
+	gw.AddHook(func(context.Context, string, map[string]interface{}) {
+		time.Sleep(time.Millisecond)
+	})
+
+	const routes = 16
+	panicCh := make(chan any, routes)
+	var wg sync.WaitGroup
+
+	for range routes {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					panicCh <- r
+				}
+			}()
+			_, err := gw.Route(context.Background(), providers.Request{
+				Model:    "gpt-4o",
+				Messages: []providers.Message{{Role: "user", Content: "hi"}},
+			})
+			if err != nil {
+				panicCh <- err
+			}
+		}()
+	}
+
+	provider.waitActive(t, int32(routes))
+
+	if err := gw.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	provider.releaseAll()
+
+	wg.Wait()
+	close(panicCh)
+	for p := range panicCh {
+		t.Fatalf("concurrent Route panicked during Close: %v", p)
+	}
+}
+
+func TestGateway_Close_MultipleHooksDuringRouteDoesNotPanic(t *testing.T) {
+	provider := newGateMockProvider(&providers.Response{ID: "ok", Model: "gpt-4o"}, nil)
+	gw, err := New(Config{
+		Strategy: StrategyConfig{Mode: ModeSingle},
+		Targets:  []Target{{VirtualKey: "gate"}},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw.RegisterProvider(provider)
+	for range 3 {
+		gw.AddHook(func(context.Context, string, map[string]interface{}) {})
+	}
+
+	routeDone := make(chan error, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				routeDone <- fmt.Errorf("panic: %v", r)
+			}
+		}()
+		_, err := gw.Route(context.Background(), providers.Request{
+			Model:    "gpt-4o",
+			Messages: []providers.Message{{Role: "user", Content: "hi"}},
+		})
+		routeDone <- err
+	}()
+
+	provider.waitActive(t, 1)
+	if err := gw.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	provider.releaseAll()
+
+	select {
+	case err := <-routeDone:
+		if err != nil {
+			t.Fatalf("Route failed or panicked with multiple hooks: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for route with multiple hooks")
+	}
+}
+
+func TestGateway_PublishEvent_NoHooks(_ *testing.T) {
+	gw := &Gateway{
+		hookDispatchQ: make(chan hookDispatch, 1),
+	}
+	gw.hookSnapshot.Store([]EventHookFunc{})
+
+	gw.publishEvent(context.Background(), completedHookEvent("no-hooks"))
 }
 
 func TestGateway_Route_ProviderNotFound(t *testing.T) {
@@ -1389,4 +2057,90 @@ func BenchmarkPublishEvent(b *testing.B) {
 	case <-time.After(5 * time.Second):
 		b.Fatalf("timed out waiting for hook dispatch: completed=%d want=%d", calls.Load(), b.N)
 	}
+}
+
+// freshProvider returns a new *providers.Response on every Complete call so
+// concurrent goroutines never share a response pointer. Used by race tests.
+type freshProvider struct {
+	name   string
+	models []string
+}
+
+func (f *freshProvider) Name() string                  { return f.name }
+func (f *freshProvider) SupportedModels() []string     { return f.models }
+func (f *freshProvider) Models() []providers.ModelInfo { return nil }
+func (f *freshProvider) SupportsModel(model string) bool {
+	for _, m := range f.models {
+		if m == model {
+			return true
+		}
+	}
+	return false
+}
+func (f *freshProvider) Complete(_ context.Context, req providers.Request) (*providers.Response, error) {
+	return &providers.Response{ID: "r", Model: req.Model, Provider: f.name}, nil
+}
+
+// TestRoute_ProviderLookup_NoDataRace is the acceptance test for issue #128.
+//
+// The lookup closure built inside getStrategy runs inside Strategy.Execute with
+// no lock held. If it reads g.providers / g.circuitBreakers directly instead of
+// from a snapshot taken under lock, a concurrent RegisterProvider (or
+// runDiscovery) that writes those maps will cause a fatal data race.
+//
+// Run with -race to verify: go test -race -run TestRoute_ProviderLookup_NoDataRace
+func TestRoute_ProviderLookup_NoDataRace(t *testing.T) {
+	gw, err := New(Config{
+		Strategy: StrategyConfig{Mode: ModeFallback},
+		Targets: []Target{
+			{VirtualKey: "p1"},
+			{VirtualKey: "p2"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw.RegisterProvider(&freshProvider{name: "p1", models: []string{"test-model"}})
+	gw.RegisterProvider(&freshProvider{name: "p2", models: []string{"test-model"}})
+
+	const routerGoroutines = 20
+	const writerGoroutines = 10
+	const iters = 40
+
+	ctx := context.Background()
+	req := providers.Request{
+		Model:    "test-model",
+		Messages: []providers.Message{{Role: roleUser, Content: "hello"}},
+	}
+
+	var wg sync.WaitGroup
+
+	// Goroutines calling Route concurrently — these will execute the lookup
+	// closure while the writers below mutate g.providers under lock.
+	for i := 0; i < routerGoroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iters; j++ {
+				_, _ = gw.Route(ctx, req)
+			}
+		}()
+	}
+
+	// Goroutines calling RegisterProvider concurrently — mirrors runtime
+	// model discovery writing g.providers under lock (issue #128 trigger).
+	for i := 0; i < writerGoroutines; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < iters/2; j++ {
+				gw.RegisterProvider(&freshProvider{
+					name:   fmt.Sprintf("dynamic-%d-%d", id, j),
+					models: []string{"other-model"},
+				})
+			}
+		}(i)
+	}
+
+	wg.Wait()
 }

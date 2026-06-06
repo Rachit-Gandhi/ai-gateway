@@ -31,7 +31,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.25.x"
+          go-version: "1.25.11"
           cache: true
 
       - name: Set up QEMU (for cross-platform Docker builds)
@@ -46,6 +46,9 @@ jobs:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify embedded catalog backup
+        run: go test ./models -run TestCatalogBackupParseable -count=1
 
       - name: Generate release notes
         env:

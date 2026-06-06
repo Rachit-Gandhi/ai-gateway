@@ -48,24 +48,26 @@ type EventHookFunc func(ctx context.Context, subject string, data map[string]int
 
 // Gateway is the main entry point for routing LLM requests.
 type Gateway struct {
-	mu               sync.RWMutex
-	config           Config
-	catalog          models.Catalog
-	providers        map[string]providers.Provider
-	providerNames    []string
-	strategy         strategies.Strategy
-	plugins          *plugin.Manager
-	closeOnce        sync.Once
-	hooks            []EventHookFunc
-	hookSnapshot     atomic.Value
-	hookDispatchQ    chan hookDispatch
-	hookWorkersDone  sync.WaitGroup
-	shutdownCtx      context.Context
-	shutdownCancel   context.CancelFunc
-	circuitBreakers  map[string]*circuitbreaker.CircuitBreaker
-	discoveredModels map[string][]providers.ModelInfo
-	latencyTracker   *latency.Tracker
-	modelIndex       modelLookupIndex
+	mu                 sync.RWMutex
+	config             Config
+	catalog            models.Catalog
+	providers          map[string]providers.Provider
+	providerNames      []string
+	strategy           strategies.Strategy
+	streamingContent   []streamingContentCondition
+	plugins            *plugin.Manager
+	closeOnce          sync.Once
+	hooks              []EventHookFunc
+	hookSnapshot       atomic.Value
+	hookDispatchQ      chan hookDispatch
+	hookWorkersDone    sync.WaitGroup
+	catalogRefreshDone sync.WaitGroup
+	shutdownCtx        context.Context
+	shutdownCancel     context.CancelFunc
+	circuitBreakers    map[string]*circuitbreaker.CircuitBreaker
+	discoveredModels   map[string][]providers.ModelInfo
+	latencyTracker     *latency.Tracker
+	modelIndex         modelLookupIndex
 
 	// obs is the observability provider used to emit per-request spans.
 	// Defaults to observability.NoOp() when SetObservability has not
@@ -93,26 +95,43 @@ type modelLookupIndex struct {
 	exactImageProviders  map[string][]string
 }
 
+type streamingContentCondition struct {
+	ContentCondition
+	re *regexp.Regexp
+}
+
 type hookDispatch struct {
 	ctx   context.Context
 	event events.HookEvent
 	hook  EventHookFunc
 }
 
-const hookDispatchQueueSize = 256
+const (
+	hookDispatchQueueSize  = 256
+	catalogRefreshInterval = 24 * time.Hour
+)
 
 // New creates a new Gateway instance with the given configuration.
 func New(cfg Config) (*Gateway, error) {
-	catalog, err := models.Load()
+	catalogResult, err := models.LoadWithInfo()
+	recordCatalogLoad(catalogResult.Source, err)
+	catalog := catalogResult.Catalog
 	if err != nil {
 		// Non-fatal: operate without model metadata (no enrichment / cost reporting).
+		slog.Error("model catalog unavailable; continuing without catalog metadata", "url", catalogResult.URLForLog(), "error", err)
 		catalog = models.Catalog{}
+	}
+
+	streamingContent, err := compileStreamingContentConditions(cfg.Strategy.Mode, cfg.Strategy.ContentConditions)
+	if err != nil {
+		return nil, err
 	}
 
 	gw := &Gateway{
 		config:           cfg,
 		catalog:          catalog,
 		providers:        make(map[string]providers.Provider),
+		streamingContent: streamingContent,
 		plugins:          plugin.NewManager(),
 		circuitBreakers:  make(map[string]*circuitbreaker.CircuitBreaker),
 		discoveredModels: make(map[string][]providers.ModelInfo),
@@ -126,9 +145,10 @@ func New(cfg Config) (*Gateway, error) {
 		hookDispatchQ: make(chan hookDispatch, hookDispatchQueueSize),
 		obs:           observability.NoOp(),
 	}
-	gw.shutdownCtx, gw.shutdownCancel = context.WithCancel(context.Background())
+	gw.shutdownCtx, gw.shutdownCancel = context.WithCancel(context.Background()) //nolint:gosec // canceled by Gateway.Close()
 	gw.hookSnapshot.Store([]EventHookFunc{})
 	gw.startHookWorkers()
+	gw.startCatalogRefresh()
 
 	// Wire MCP if any servers are configured.
 	if len(cfg.MCPServers) > 0 {
@@ -209,6 +229,56 @@ func (g *Gateway) Catalog() models.Catalog {
 	cp := make(models.Catalog, len(g.catalog))
 	maps.Copy(cp, g.catalog)
 	return cp
+}
+
+func (g *Gateway) startCatalogRefresh() {
+	g.catalogRefreshDone.Add(1)
+	go func() {
+		defer g.catalogRefreshDone.Done()
+		ticker := time.NewTicker(catalogRefreshInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-g.shutdownCtx.Done():
+				return
+			case <-ticker.C:
+				g.refreshCatalog()
+			}
+		}
+	}()
+}
+
+func (g *Gateway) refreshCatalog() {
+	result, err := models.LoadWithInfo()
+	recordCatalogLoad(result.Source, err)
+	if err != nil {
+		slog.Error("model catalog refresh failed", "url", result.URLForLog(), "error", err)
+		return
+	}
+	if result.Source != models.LoadSourceRemote {
+		slog.Warn("model catalog refresh skipped; keeping current catalog", "url", result.URLForLog(), "source", result.Source)
+		return
+	}
+
+	g.mu.Lock()
+	g.catalog = result.Catalog
+	if g.config.Strategy.Mode == ModeCostOptimized {
+		g.strategy = nil
+	}
+	g.mu.Unlock()
+
+	slog.Info("model catalog refreshed", "url", result.URLForLog(), "models", len(result.Catalog))
+}
+
+func recordCatalogLoad(source models.LoadSource, err error) {
+	if source == "" {
+		source = models.LoadSourceFallback
+	}
+	result := "success"
+	if err != nil {
+		result = "error"
+	}
+	metrics.CatalogLoadsTotal.WithLabelValues(string(source), result).Inc()
 }
 
 // Event subject constants used when invoking gateway hooks.
@@ -741,9 +811,14 @@ func (g *Gateway) ReloadConfig(cfg Config) error {
 	if err := ValidateConfig(cfg); err != nil {
 		return fmt.Errorf("invalid config: %w", err)
 	}
+	streamingContent, err := compileStreamingContentConditions(cfg.Strategy.Mode, cfg.Strategy.ContentConditions)
+	if err != nil {
+		return fmt.Errorf("invalid config: %w", err)
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.config = cfg
+	g.streamingContent = streamingContent
 	g.strategy = nil // force rebuild on next request
 	g.circuitBreakers = make(map[string]*circuitbreaker.CircuitBreaker)
 
@@ -812,23 +887,25 @@ func (g *Gateway) getStrategy() (strategies.Strategy, error) {
 		g.circuitBreakers[t.VirtualKey] = cb
 	}
 
+	// Snapshot both maps under the write lock already held. The lookup closure
+	// runs inside Strategy.Execute with no lock held, so capturing local copies
+	// here is the only safe access pattern.
+	// maps.Clone is a shallow copy — safe because map values (Provider, *CB) are
+	// themselves immutable references; we never mutate through them in the closure.
+	providerSnap := maps.Clone(g.providers)
+	cbSnap := maps.Clone(g.circuitBreakers)
+
 	// Provider lookup with transparent circuit-breaker wrapping.
 	//
 	// The closure is captured into the strategy and invoked later from the
-	// request hot path, AFTER Route/RouteStream have released g.mu. It
-	// therefore needs its own RLock to coordinate with RegisterProvider and
-	// ReloadConfig (which reassigns circuitBreakers wholesale, line 707).
-	// Safe under sync.RWMutex because the calling paths drop the lock before
-	// strategy execution — see gateway.go:330 (Route) and
-	// gateway.go:1108 (RouteStream).
+	// request hot path, AFTER Route/RouteStream have released g.mu. It reads
+	// from the snapshots captured above, so no lock is needed in the closure.
 	lookup := func(name string) (providers.Provider, bool) {
-		g.mu.RLock()
-		defer g.mu.RUnlock()
-		p, ok := g.providers[name]
+		p, ok := providerSnap[name]
 		if !ok {
 			return nil, false
 		}
-		if cb, hasCB := g.circuitBreakers[name]; hasCB {
+		if cb, hasCB := cbSnap[name]; hasCB {
 			return &cbProvider{Provider: p, cb: cb, name: name}, true
 		}
 		return p, ok
@@ -1306,7 +1383,7 @@ func (g *Gateway) streamingTargetOrderLocked(req providers.Request) []string {
 		return keys
 	case ModeContentBased:
 		// Evaluate content rules in order; first match wins, fallback is targets[0].
-		for _, cond := range g.config.Strategy.ContentConditions {
+		for _, cond := range g.streamingContent {
 			if streamingContentConditionMatches(cond, req) {
 				// Matched target first, then remaining targets as fallback.
 				keys := []string{cond.TargetKey}
@@ -1504,9 +1581,28 @@ func conditionMatches(cond Condition, model string) bool {
 	}
 }
 
+func compileStreamingContentConditions(mode StrategyMode, conditions []ContentCondition) ([]streamingContentCondition, error) {
+	if mode != ModeContentBased {
+		return nil, nil
+	}
+	compiled := make([]streamingContentCondition, len(conditions))
+	for i, cond := range conditions {
+		compiled[i].ContentCondition = cond
+		if cond.Type != "prompt_regex" {
+			continue
+		}
+		re, err := regexp.Compile(cond.Value)
+		if err != nil {
+			return nil, fmt.Errorf("streaming content-based routing: invalid regex %q in rule %d: %w", cond.Value, i, err)
+		}
+		compiled[i].re = re
+	}
+	return compiled, nil
+}
+
 // streamingContentConditionMatches evaluates a single ContentCondition against
 // a request, mirroring the logic in internal/strategies/contentbased.go.
-func streamingContentConditionMatches(cond ContentCondition, req providers.Request) bool {
+func streamingContentConditionMatches(cond streamingContentCondition, req providers.Request) bool {
 	switch cond.Type {
 	case "prompt_contains":
 		lower := strings.ToLower(cond.Value)
@@ -1525,12 +1621,11 @@ func streamingContentConditionMatches(cond ContentCondition, req providers.Reque
 		}
 		return true
 	case "prompt_regex":
-		re, err := regexp.Compile(cond.Value)
-		if err != nil {
+		if cond.re == nil {
 			return false
 		}
 		for _, msg := range req.Messages {
-			if msg.Role == roleUser && re.MatchString(msg.Content) {
+			if msg.Role == roleUser && cond.re.MatchString(msg.Content) {
 				return true
 			}
 		}
@@ -1655,9 +1750,9 @@ func (g *Gateway) FindStreamingByModel(model string) (providers.StreamProvider, 
 
 // Close cleans up resources.
 //
-// Cancels the gateway shutdown context (which signals hook workers to drain
-// and exit) and waits up to 5s for the workers to finish so in-flight hook
-// dispatches are not abruptly killed. Returns nil even if the worker drain
+// Cancels the gateway shutdown context (which signals hook workers and the
+// catalog refresh worker to exit) and waits up to 5s for workers to finish so
+// in-flight hook dispatches are not abruptly killed. Returns nil even if the worker drain
 // times out — Close must never block indefinitely (a panicking hook could
 // otherwise wedge shutdown).
 //
@@ -1668,6 +1763,7 @@ func (g *Gateway) Close() error {
 		done := make(chan struct{})
 		go func() {
 			g.hookWorkersDone.Wait()
+			g.catalogRefreshDone.Wait()
 			close(done)
 		}()
 		select {
