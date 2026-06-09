@@ -1293,10 +1293,11 @@ func (g *Gateway) RouteStream(ctx context.Context, req providers.Request) (<-cha
 	g.mu.RUnlock()
 
 	meta := streamwrap.MeterMeta{
-		Provider: providerName,
-		Model:    req.Model,
-		Catalog:  catalog,
-		TraceID:  logging.TraceIDFromContext(ctx),
+		Provider:        providerName,
+		Model:           req.Model,
+		Catalog:         catalog,
+		TraceID:         logging.TraceIDFromContext(ctx),
+		LatencyRecorder: g.latencyTracker.Record,
 	}
 	if hooksEnabled {
 		meta.PublishFn = g.publishEvent

@@ -481,6 +481,32 @@ func TestGateway_RouteStream_LeastLatencyUsesObservedP50(t *testing.T) {
 	drainStream(t, ch)
 }
 
+func TestGateway_RouteStream_LeastLatencyRecordsStreamLatency(t *testing.T) {
+	gw, err := New(Config{
+		Strategy: StrategyConfig{Mode: ModeLatency},
+		Targets:  []Target{{VirtualKey: "stream"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw.RegisterProvider(&mockStreamProvider{
+		mockProvider: mockProvider{name: "stream", models: []string{"gpt-4o"}},
+	})
+
+	ch, err := gw.RouteStream(context.Background(), providers.Request{
+		Model:    "gpt-4o",
+		Messages: []providers.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("RouteStream error = %v", err)
+	}
+	drainStream(t, ch)
+
+	if !gw.latencyTracker.HasSamples("stream") {
+		t.Fatal("expected RouteStream to record a latency sample")
+	}
+}
+
 func TestGateway_RouteStream_CostOptimizedUsesCatalogCost(t *testing.T) {
 	gw, err := New(Config{
 		Strategy: StrategyConfig{Mode: ModeCostOptimized},

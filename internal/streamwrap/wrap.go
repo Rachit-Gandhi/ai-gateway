@@ -34,6 +34,8 @@ type MeterMeta struct {
 	PublishFn func(ctx context.Context, event events.HookEvent)
 	// TraceID is the per-request trace identifier, forwarded into events.
 	TraceID string
+	// LatencyRecorder, if non-nil, records successful stream latency for routing.
+	LatencyRecorder func(provider string, latency time.Duration)
 	// SpanFinisher, if non-nil, is invoked exactly once when the stream
 	// completes (with final usage + cost + timings) or fails. The
 	// gateway uses this to stamp the observability root span with the
@@ -186,6 +188,10 @@ func Meter(ctx context.Context, src <-chan providers.StreamChunk, start time.Tim
 				})
 			}
 			return
+		}
+
+		if meta.LatencyRecorder != nil && meta.Provider != "" {
+			meta.LatencyRecorder(meta.Provider, latency)
 		}
 
 		// Success path: emit the same metrics as Gateway.Route().
