@@ -88,6 +88,148 @@ func counterValue(t *testing.T, c prometheus.Counter) float64 {
 
 func ptrFloat64(v float64) *float64 { return &v }
 
+func catalogLoadCounterValue(t *testing.T, source models.LoadSource, result string) float64 {
+	t.Helper()
+	return counterValue(t, metrics.CatalogLoadsTotal.WithLabelValues(string(source), result))
+}
+
+func setCatalogServerBody(t *testing.T, body *atomic.Value, catalog models.Catalog) {
+	t.Helper()
+	data, err := json.Marshal(catalog)
+	if err != nil {
+		t.Fatalf("marshal test catalog: %v", err)
+	}
+	body.Store(data)
+}
+
+func testCatalog(provider, modelID, displayName string, inputPerMTokens float64) models.Catalog {
+	return models.Catalog{
+		provider + "/" + modelID: {
+			Provider:    provider,
+			ModelID:     modelID,
+			DisplayName: displayName,
+			Mode:        models.ModeChat,
+			Pricing: models.Pricing{
+				InputPerMTokens: ptrFloat64(inputPerMTokens),
+			},
+		},
+	}
+}
+
+func TestGateway_RefreshCatalog_ReplacesRemoteCatalogAndInvalidatesCostOptimizedStrategy(t *testing.T) {
+	var body atomic.Value
+	setCatalogServerBody(t, &body, testCatalog("priced", "gpt-4o", "initial catalog", 1.00))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body.Load().([]byte))
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv(models.CatalogURLEnv, server.URL)
+
+	beforeNew := catalogLoadCounterValue(t, models.LoadSourceRemote, "success")
+	gw, err := New(Config{
+		Strategy: StrategyConfig{Mode: ModeCostOptimized},
+		Targets:  []Target{{VirtualKey: "priced"}},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = gw.Close() }()
+	if got := catalogLoadCounterValue(t, models.LoadSourceRemote, "success"); got != beforeNew+1 {
+		t.Fatalf("remote success catalog load counter after New = %v, want %v", got, beforeNew+1)
+	}
+	if model, ok := gw.Catalog().Get("priced/gpt-4o"); !ok || model.DisplayName != "initial catalog" {
+		t.Fatalf("initial catalog = (%+v, %v), want priced/gpt-4o from initial remote catalog", model, ok)
+	}
+
+	gw.RegisterProvider(&mockProvider{
+		name:   "priced",
+		models: []string{"gpt-4o"},
+		resp:   &providers.Response{ID: "r1", Model: "gpt-4o"},
+	})
+	if _, err := gw.getStrategy(); err != nil {
+		t.Fatalf("getStrategy: %v", err)
+	}
+	if gw.strategy == nil {
+		t.Fatal("getStrategy did not cache a strategy")
+	}
+
+	setCatalogServerBody(t, &body, testCatalog("priced", "gpt-4.1", "refreshed catalog", 2.00))
+	beforeRefresh := catalogLoadCounterValue(t, models.LoadSourceRemote, "success")
+	gw.refreshCatalog()
+
+	if got := catalogLoadCounterValue(t, models.LoadSourceRemote, "success"); got != beforeRefresh+1 {
+		t.Fatalf("remote success catalog load counter after refresh = %v, want %v", got, beforeRefresh+1)
+	}
+	refreshed := gw.Catalog()
+	if _, ok := refreshed.Get("priced/gpt-4o"); ok {
+		t.Fatal("refresh should replace the catalog, but old model priced/gpt-4o is still present")
+	}
+	if model, ok := refreshed.Get("priced/gpt-4.1"); !ok || model.DisplayName != "refreshed catalog" {
+		t.Fatalf("refreshed catalog = (%+v, %v), want priced/gpt-4.1 from refreshed remote catalog", model, ok)
+	}
+	if gw.strategy != nil {
+		t.Fatal("cost-optimized strategy cache should be cleared after a successful remote catalog refresh")
+	}
+}
+
+func TestGateway_RefreshCatalog_KeepsCurrentCatalogOnFallback(t *testing.T) {
+	var status atomic.Int32
+	status.Store(http.StatusOK)
+	var body atomic.Value
+	setCatalogServerBody(t, &body, testCatalog("priced", "gpt-4o", "current remote catalog", 1.00))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if code := int(status.Load()); code != http.StatusOK {
+			http.Error(w, "catalog unavailable", code)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body.Load().([]byte))
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv(models.CatalogURLEnv, server.URL)
+
+	gw, err := New(Config{
+		Strategy: StrategyConfig{Mode: ModeCostOptimized},
+		Targets:  []Target{{VirtualKey: "priced"}},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = gw.Close() }()
+	gw.RegisterProvider(&mockProvider{
+		name:   "priced",
+		models: []string{"gpt-4o"},
+		resp:   &providers.Response{ID: "r1", Model: "gpt-4o"},
+	})
+	if _, err := gw.getStrategy(); err != nil {
+		t.Fatalf("getStrategy: %v", err)
+	}
+	cachedStrategy := gw.strategy
+	if cachedStrategy == nil {
+		t.Fatal("getStrategy did not cache a strategy")
+	}
+
+	status.Store(http.StatusInternalServerError)
+	setCatalogServerBody(t, &body, testCatalog("fallback-attempt", "should-not-appear", "ignored fallback attempt", 0.01))
+	beforeFallback := catalogLoadCounterValue(t, models.LoadSourceFallback, "success")
+	gw.refreshCatalog()
+
+	if got := catalogLoadCounterValue(t, models.LoadSourceFallback, "success"); got != beforeFallback+1 {
+		t.Fatalf("fallback success catalog load counter after refresh = %v, want %v", got, beforeFallback+1)
+	}
+	current := gw.Catalog()
+	if model, ok := current.Get("priced/gpt-4o"); !ok || model.DisplayName != "current remote catalog" {
+		t.Fatalf("current catalog = (%+v, %v), want original remote catalog preserved", model, ok)
+	}
+	if _, ok := current.Get("fallback-attempt/should-not-appear"); ok {
+		t.Fatal("fallback refresh should not replace the current catalog with a fallback catalog")
+	}
+	if gw.strategy != cachedStrategy {
+		t.Fatal("fallback refresh should not invalidate the cached strategy")
+	}
+}
+
 func TestGateway_Route_Single(t *testing.T) {
 	gw, _ := New(Config{
 		Strategy: StrategyConfig{Mode: ModeSingle},
