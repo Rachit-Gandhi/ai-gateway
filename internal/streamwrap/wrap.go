@@ -90,9 +90,30 @@ func Meter(ctx context.Context, src <-chan providers.StreamChunk, start time.Tim
 
 		var usage providers.Usage
 		var streamErr error
+		var providerErr error // chunk.Error only; never client ctx cancellation
 		var firstChunkAt time.Time
 		var lastChunkAt time.Time
 		clientCanceled := false
+
+		recordCircuitBreakerOutcome := func() {
+			if meta.CircuitBreakerOutcome == nil {
+				return
+			}
+			if providerErr != nil {
+				meta.CircuitBreakerOutcome(providerErr)
+				return
+			}
+			if clientCanceled {
+				// Client disconnect is not a provider failure. When the provider
+				// already delivered chunks, record success so half-open circuits
+				// can close after probe streams that the client abandons.
+				if !firstChunkAt.IsZero() {
+					meta.CircuitBreakerOutcome(nil)
+				}
+				return
+			}
+			meta.CircuitBreakerOutcome(nil)
+		}
 
 	loop:
 		for {
@@ -110,6 +131,7 @@ func Meter(ctx context.Context, src <-chan providers.StreamChunk, start time.Tim
 				}
 				for chunk := range src {
 					if chunk.Error != nil {
+						providerErr = chunk.Error
 						streamErr = chunk.Error
 					}
 				}
@@ -131,6 +153,7 @@ func Meter(ctx context.Context, src <-chan providers.StreamChunk, start time.Tim
 					usage = *chunk.Usage
 				}
 				if chunk.Error != nil {
+					providerErr = chunk.Error
 					streamErr = chunk.Error
 				}
 
@@ -145,6 +168,7 @@ func Meter(ctx context.Context, src <-chan providers.StreamChunk, start time.Tim
 					}
 					for chunk := range src {
 						if chunk.Error != nil {
+							providerErr = chunk.Error
 							streamErr = chunk.Error
 						}
 					}
@@ -200,9 +224,7 @@ func Meter(ctx context.Context, src <-chan providers.StreamChunk, start time.Tim
 					ErrorMsg:  streamErr.Error(),
 				})
 			}
-			if meta.CircuitBreakerOutcome != nil {
-				meta.CircuitBreakerOutcome(streamErr)
-			}
+			recordCircuitBreakerOutcome()
 			return
 		}
 
@@ -257,9 +279,7 @@ func Meter(ctx context.Context, src <-chan providers.StreamChunk, start time.Tim
 				TTLTMs:      ttltMs,
 			})
 		}
-		if meta.CircuitBreakerOutcome != nil {
-			meta.CircuitBreakerOutcome(nil)
-		}
+		recordCircuitBreakerOutcome()
 	}()
 
 	return out
