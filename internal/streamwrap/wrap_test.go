@@ -204,6 +204,51 @@ type streamError struct{ msg string }
 
 func (e *streamError) Error() string { return e.msg }
 
+func TestMeter_CircuitBreakerOutcome_RecordsSuccessOnClientCancelAfterChunks(t *testing.T) {
+	src := make(chan providers.StreamChunk, 2)
+	src <- providers.StreamChunk{ID: "1"}
+	src <- providers.StreamChunk{ID: "2"}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	var mu sync.Mutex
+	var outcomes []error
+	outcomeFn := func(err error) {
+		mu.Lock()
+		outcomes = append(outcomes, err)
+		mu.Unlock()
+	}
+
+	out := Meter(ctx, src, time.Now(), MeterMeta{
+		Provider:              "openai",
+		Model:                 "gpt-4o",
+		Catalog:               models.Catalog{},
+		CircuitBreakerOutcome: outcomeFn,
+	})
+
+	if _, ok := <-out; !ok {
+		t.Fatal("expected first chunk")
+	}
+	cancel()
+
+	go func() {
+		src <- providers.StreamChunk{ID: "3"}
+		close(src)
+	}()
+
+	for range out { //nolint:revive
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(outcomes) != 1 {
+		t.Fatalf("outcomes len = %d, want 1", len(outcomes))
+	}
+	if outcomes[0] != nil {
+		t.Fatalf("outcome = %v, want nil success after client cancel with chunks", outcomes[0])
+	}
+}
+
 func TestMeter_CircuitBreakerOutcome_PreservesProviderErrorOnClientCancel(t *testing.T) {
 	providerErr := errors.New("provider blew up")
 	src := make(chan providers.StreamChunk)
