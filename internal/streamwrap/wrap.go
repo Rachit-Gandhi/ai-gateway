@@ -49,6 +49,9 @@ type MeterMeta struct {
 	// ErrorFn, if non-nil, is invoked once when the upstream stream fails or
 	// the downstream client cancels before the stream completes.
 	ErrorFn func(ctx context.Context, err error)
+	// CircuitBreakerOutcome, if non-nil, is invoked once when the stream
+	// finishes. err is nil on success; non-nil on provider/stream failure.
+	CircuitBreakerOutcome func(err error)
 }
 
 // StreamOutcome bundles the values stamped onto the observability span
@@ -113,8 +116,13 @@ func Meter(ctx context.Context, src <-chan providers.StreamChunk, start time.Tim
 				// MUST close src eventually for this to terminate; that is
 				// the existing contract for every CompleteStream impl.
 				clientCanceled = true
-				streamErr = ctx.Err()
-				for range src { //nolint:revive
+				if streamErr == nil {
+					streamErr = ctx.Err()
+				}
+				for chunk := range src {
+					if chunk.Error != nil {
+						streamErr = chunk.Error
+					}
 				}
 				break loop
 			case chunk, ok := <-src:
@@ -144,8 +152,13 @@ func Meter(ctx context.Context, src <-chan providers.StreamChunk, start time.Tim
 				case out <- chunk:
 				case <-ctx.Done():
 					clientCanceled = true
-					streamErr = ctx.Err()
-					for range src { //nolint:revive
+					if streamErr == nil {
+						streamErr = ctx.Err()
+					}
+					for chunk := range src {
+						if chunk.Error != nil {
+							streamErr = chunk.Error
+						}
 					}
 					break loop
 				}
@@ -202,6 +215,9 @@ func Meter(ctx context.Context, src <-chan providers.StreamChunk, start time.Tim
 					ErrorMsg:  streamErr.Error(),
 				})
 			}
+			if meta.CircuitBreakerOutcome != nil {
+				meta.CircuitBreakerOutcome(streamErr)
+			}
 			return
 		}
 
@@ -222,9 +238,6 @@ func Meter(ctx context.Context, src <-chan providers.StreamChunk, start time.Tim
 				case out <- providers.StreamChunk{Error: err}:
 				case <-ctx.Done():
 				}
-				if meta.ErrorFn != nil {
-					meta.ErrorFn(ctx, err)
-				}
 				if meta.SpanFinisher != nil {
 					meta.SpanFinisher.Finish(StreamOutcome{
 						TokensIn:  usage.PromptTokens,
@@ -233,6 +246,10 @@ func Meter(ctx context.Context, src <-chan providers.StreamChunk, start time.Tim
 						TTLTMs:    ttltMs,
 						ErrorMsg:  err.Error(),
 					})
+				}
+				// Provider stream completed; plugin failure must not block CB recovery.
+				if meta.CircuitBreakerOutcome != nil {
+					meta.CircuitBreakerOutcome(nil)
 				}
 				return
 			}
@@ -284,6 +301,9 @@ func Meter(ctx context.Context, src <-chan providers.StreamChunk, start time.Tim
 				TTFTMs:      ttftMs,
 				TTLTMs:      ttltMs,
 			})
+		}
+		if meta.CircuitBreakerOutcome != nil {
+			meta.CircuitBreakerOutcome(nil)
 		}
 	}()
 
