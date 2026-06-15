@@ -965,6 +965,51 @@ func TestGateway_RouteStream_FallbackSkipsNonStreamingTargetWithCircuitBreaker(t
 	}
 }
 
+func TestGateway_RouteStream_FallsBackToRegisteredStreamingProviderByModel(t *testing.T) {
+	var selected atomic.Value
+	gw, err := New(Config{
+		Strategy: StrategyConfig{Mode: ModeFallback},
+		Targets: []Target{
+			{VirtualKey: "plain"},
+			{VirtualKey: "missing"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	gw.RegisterProvider(&mockProvider{
+		name:   "plain",
+		models: []string{"gpt-4o"},
+	})
+	gw.RegisterProvider(&mockStreamProvider{
+		mockProvider: mockProvider{
+			name:   "indexed-stream",
+			models: []string{"gpt-4o"},
+		},
+		streamFn: func(_ context.Context, _ providers.Request) (<-chan providers.StreamChunk, error) {
+			selected.Store("indexed-stream")
+			ch := make(chan providers.StreamChunk, 1)
+			ch <- providers.StreamChunk{
+				ID: "stream-ok",
+				Choices: []providers.StreamChoice{{
+					Delta: providers.MessageDelta{Content: "ok"},
+				}},
+			}
+			close(ch)
+			return ch, nil
+		},
+	})
+
+	ch, err := gw.RouteStream(context.Background(), streamTestRequest())
+	if err != nil {
+		t.Fatalf("RouteStream error = %v, want indexed streaming provider fallback", err)
+	}
+	drainMeteredStream(t, ch)
+	if got := selected.Load(); got != "indexed-stream" {
+		t.Fatalf("selected provider = %v, want indexed-stream", got)
+	}
+}
+
 func TestGateway_RouteStream_StartupCancellationDoesNotTripCircuit(t *testing.T) {
 	gw, err := New(Config{
 		Strategy: StrategyConfig{Mode: ModeSingle},
