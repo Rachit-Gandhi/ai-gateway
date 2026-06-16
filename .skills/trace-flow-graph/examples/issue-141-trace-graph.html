@@ -1,0 +1,788 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Issue #141 — Chat Completions Trace Graph</title>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --surface: #171b24;
+      --surface-2: #1e2430;
+      --border: #2a3344;
+      --text: #e6edf7;
+      --muted: #8b9bb4;
+      --accent: #6ea8fe;
+      --accent-2: #79c0ff;
+      --shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      background: radial-gradient(circle at top, #151a24 0%, var(--bg) 55%);
+      color: var(--text);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    header {
+      flex-shrink: 0;
+      z-index: 100;
+      backdrop-filter: blur(12px);
+      background: rgba(15, 17, 23, 0.92);
+      border-bottom: 1px solid var(--border);
+      padding: 0.85rem 1.25rem;
+    }
+
+    header h1 { margin: 0 0 0.2rem; font-size: 1.1rem; font-weight: 650; }
+    header p { margin: 0; color: var(--muted); font-size: 0.82rem; }
+
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.5rem 1rem;
+      margin-top: 0.65rem;
+    }
+
+    .toolbar button {
+      background: var(--surface-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.35rem 0.7rem;
+      font-size: 0.78rem;
+      cursor: pointer;
+    }
+
+    .toolbar button:hover {
+      border-color: var(--accent);
+      background: rgba(110, 168, 254, 0.12);
+    }
+
+    .hint { font-size: 0.75rem; color: var(--muted); }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem 0.85rem;
+    }
+
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      font-size: 0.72rem;
+      color: var(--muted);
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+
+    .viewport {
+      flex: 1;
+      overflow: auto;
+      cursor: grab;
+      background:
+        radial-gradient(circle at 1px 1px, rgba(255,255,255,0.04) 1px, transparent 0);
+      background-size: 24px 24px;
+    }
+
+    .viewport.panning { cursor: grabbing; }
+
+    .graph {
+      position: relative;
+      width: 2200px;
+      height: 1700px;
+      margin: 0;
+    }
+
+    svg.edges {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      overflow: visible;
+      z-index: 0;
+    }
+
+    .edge {
+      fill: none;
+      stroke: #4a5d78;
+      stroke-width: 2;
+      marker-end: url(#arrow);
+    }
+
+    .edge.decision { stroke-dasharray: 7 5; stroke: #6ea8fe; marker-end: url(#arrow-blue); }
+    .edge.error { stroke-dasharray: 5 4; stroke: #f85149; marker-end: url(#arrow-red); }
+    .edge.issue { stroke: #ff7b72; stroke-width: 2.5; marker-end: url(#arrow-issue); }
+    .edge.dep { stroke-dasharray: 3 4; stroke: #a371f7; opacity: 0.85; marker-end: url(#arrow-purple); }
+
+    .draggable {
+      position: absolute;
+      z-index: 1;
+      touch-action: none;
+    }
+
+    .draggable.dragging { z-index: 50; opacity: 0.97; }
+
+    .node {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: var(--shadow);
+      width: 280px;
+    }
+
+    .node.wide { width: 300px; }
+    .node.xwide { width: 400px; }
+
+    .node.issue-highlight {
+      border-color: rgba(255, 123, 114, 0.65);
+      box-shadow: 0 0 0 1px rgba(255, 123, 114, 0.25), var(--shadow);
+    }
+
+    .drag-handle {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      padding: 0.45rem 0.75rem;
+      border-bottom: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.03);
+      border-radius: 12px 12px 0 0;
+      cursor: grab;
+      user-select: none;
+    }
+
+    .drag-handle:active { cursor: grabbing; }
+    .drag-handle .grip { color: var(--muted); font-size: 0.85rem; letter-spacing: 2px; }
+
+    .node-body { padding: 0.75rem 0.9rem 0.9rem; }
+
+    .node .tag {
+      display: inline-block;
+      font-size: 0.65rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      padding: 0.12rem 0.4rem;
+      border-radius: 999px;
+    }
+
+    .node h3 { margin: 0 0 0.3rem; font-size: 0.92rem; line-height: 1.25; }
+
+    .node .path, .node .file {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.7rem;
+      color: var(--muted);
+      word-break: break-all;
+    }
+
+    .node ul {
+      margin: 0.45rem 0 0;
+      padding-left: 1rem;
+      font-size: 0.76rem;
+      color: #c9d4e5;
+    }
+
+    .node li { margin: 0.12rem 0; }
+
+    .tag.router { background: rgba(63, 185, 80, 0.15); color: #7ee787; }
+    .tag.handler { background: rgba(210, 153, 34, 0.15); color: #e3b341; }
+    .tag.gateway { background: rgba(163, 113, 247, 0.15); color: #d2a8ff; }
+    .tag.decode { background: rgba(247, 120, 186, 0.15); color: #ff9bce; }
+    .tag.request { background: rgba(88, 166, 255, 0.15); color: #79c0ff; }
+    .tag.stream { background: rgba(86, 212, 221, 0.15); color: #56d4dd; }
+    .tag.nonstream { background: rgba(255, 166, 87, 0.15); color: #ffb86c; }
+    .tag.error { background: rgba(248, 81, 73, 0.15); color: #ff7b72; }
+
+    .field-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.3rem 0.6rem;
+      margin-top: 0.45rem;
+      font-size: 0.7rem;
+    }
+
+    .field {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.3rem 0.4rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    .field .name { color: var(--accent-2); display: block; }
+    .field .type { color: var(--muted); font-size: 0.64rem; }
+    .field.issue { border-color: rgba(255, 123, 114, 0.55); background: rgba(255, 123, 114, 0.08); }
+    .field .json-key { color: #ffa657; font-size: 0.64rem; }
+
+    .section-label {
+      grid-column: 1 / -1;
+      font-size: 0.65rem;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-top: 0.2rem;
+    }
+
+    .fork-label {
+      font-size: 0.78rem;
+      font-weight: 700;
+      color: var(--accent);
+      background: rgba(110, 168, 254, 0.12);
+      border: 1px solid rgba(110, 168, 254, 0.35);
+      padding: 0.35rem 0.65rem;
+      border-radius: 999px;
+      cursor: grab;
+      user-select: none;
+    }
+
+    .fork-label:active { cursor: grabbing; }
+
+    .note {
+      width: 300px;
+      background: rgba(30, 36, 48, 0.96);
+      border: 1px dashed var(--border);
+      border-radius: 10px;
+      font-size: 0.74rem;
+      color: var(--muted);
+      line-height: 1.45;
+      overflow: hidden;
+    }
+
+    .note .drag-handle { border-radius: 10px 10px 0 0; padding: 0.35rem 0.65rem; }
+    .note-body { padding: 0.65rem 0.75rem 0.75rem; }
+    .note strong { color: var(--text); }
+
+    footer {
+      flex-shrink: 0;
+      text-align: center;
+      padding: 0.45rem;
+      color: var(--muted);
+      font-size: 0.72rem;
+      border-top: 1px solid var(--border);
+      background: rgba(15, 17, 23, 0.92);
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Issue #141 — POST /v1/chat/completions trace (ingress → req fork)</h1>
+    <p>NewRouter → mountOpenAIRoutes → ChatCompletions → DecodeChatCompletionRequest → providers.Request → stream split</p>
+    <div class="toolbar">
+      <div class="legend">
+        <span><i class="dot" style="background:#3fb950"></i> Router</span>
+        <span><i class="dot" style="background:#d29922"></i> Handler</span>
+        <span><i class="dot" style="background:#a371f7"></i> Gateway</span>
+        <span><i class="dot" style="background:#f778ba"></i> Decode</span>
+        <span><i class="dot" style="background:#58a6ff"></i> Request</span>
+        <span><i class="dot" style="background:#56d4dd"></i> Stream</span>
+        <span><i class="dot" style="background:#ffa657"></i> Non-stream</span>
+        <span><i class="dot" style="background:#ff7b72"></i> #141 fields</span>
+      </div>
+      <span class="hint">Drag node headers · lines follow · pan on empty canvas · layout auto-saves</span>
+      <button type="button" id="reset-layout">Reset layout</button>
+      <button type="button" id="fit-view">Fit to view</button>
+    </div>
+  </header>
+
+  <div class="viewport" id="viewport">
+    <div class="graph" id="graph">
+      <svg class="edges" id="edges-svg">
+        <defs>
+          <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+            <path d="M0,0 L0,6 L8,3 z" fill="#4a5d78" />
+          </marker>
+          <marker id="arrow-blue" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+            <path d="M0,0 L0,6 L8,3 z" fill="#6ea8fe" />
+          </marker>
+          <marker id="arrow-red" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+            <path d="M0,0 L0,6 L8,3 z" fill="#f85149" />
+          </marker>
+          <marker id="arrow-issue" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+            <path d="M0,0 L0,6 L8,3 z" fill="#ff7b72" />
+          </marker>
+          <marker id="arrow-purple" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+            <path d="M0,0 L0,6 L8,3 z" fill="#a371f7" />
+          </marker>
+        </defs>
+        <g id="edges-group"></g>
+      </svg>
+
+      <!-- nodes unchanged from before -->
+      <div class="draggable node" id="bootstrap" data-x="60" data-y="60">
+        <div class="drag-handle"><span class="tag router">Entry</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>bootstrap.Run()</h3>
+          <div class="file">internal/bootstrap/bootstrap.go</div>
+          <ul>
+            <li>Builds registry, key store, config</li>
+            <li>Creates <code>*Gateway</code></li>
+            <li>Calls <code>httpserver.NewRouter(..., gw, ...)</code></li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="draggable node" id="new-router" data-x="60" data-y="260">
+        <div class="drag-handle"><span class="tag router">Router</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>NewRouter(...)</h3>
+          <div class="file">internal/httpserver/router.go:31</div>
+          <ul>
+            <li><code>ensureGateway(gw, registry)</code></li>
+            <li><code>chi.NewRouter()</code></li>
+            <li>Middleware: OTel, logging, recover, CORS, rate-limit</li>
+            <li>Mounts operational, dashboard, admin routes</li>
+            <li><strong>mountOpenAIRoutes(r, gw, ...)</strong></li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="draggable node" id="middleware" data-x="60" data-y="500">
+        <div class="drag-handle"><span class="tag router">Middleware</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>Global chi stack</h3>
+          <div class="file">router.go:52–68</div>
+          <ul>
+            <li><code>gwotel.Middleware</code></li>
+            <li><code>logging.Middleware</code> → X-Request-ID</li>
+            <li><code>chimw.Recoverer</code></li>
+            <li><code>middleware.CORS</code></li>
+            <li><code>middleware.RateLimit</code> (optional)</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="draggable node" id="mount-openai" data-x="60" data-y="720">
+        <div class="drag-handle"><span class="tag router">Mount</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>mountOpenAIRoutes()</h3>
+          <div class="file">router.go:194</div>
+          <ul>
+            <li><code>auth := middleware.ProxyAuth(...)</code></li>
+            <li>Group with auth middleware</li>
+            <li>GET <code>/v1/models</code></li>
+            <li><strong>POST /v1/chat/completions</strong></li>
+            <li>POST /v1/completions, embeddings, images</li>
+            <li>HandleFunc <code>/v1/*</code> proxy passthrough</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="draggable node" id="post-route" data-x="60" data-y="980">
+        <div class="drag-handle"><span class="tag router">Route</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>POST /v1/chat/completions</h3>
+          <div class="path">r.Post(..., handler.ChatCompletions(gw))</div>
+          <div class="file">router.go:200</div>
+          <ul>
+            <li>Requires authenticated request</li>
+            <li>Closes over <code>*Gateway</code></li>
+            <li>Returns <code>http.HandlerFunc</code></li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="draggable node wide" id="gateway" data-x="60" data-y="1220">
+        <div class="drag-handle"><span class="tag gateway">Dependency</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>*aigateway.Gateway</h3>
+          <div class="file">gateway.go:51</div>
+          <ul>
+            <li><code>sync.RWMutex</code> + provider map</li>
+            <li>Routing strategy + plugins manager</li>
+            <li>Circuit breakers, latency tracker</li>
+            <li>Observability (OTel spans)</li>
+            <li><code>Route(ctx, req)</code> — non-stream</li>
+            <li><code>RouteStream(ctx, req)</code> — stream</li>
+            <li><code>FindByModel</code> / <code>FindStreamingByModel</code></li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="draggable node wide" id="chat-completions" data-x="480" data-y="900">
+        <div class="drag-handle"><span class="tag handler">Handler</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>ChatCompletions(gw)</h3>
+          <div class="file">internal/handler/chat.go:14</div>
+          <div class="path">→ http.HandlerFunc</div>
+          <ul>
+            <li>1. <code>DecodeChatCompletionRequest(r.Body)</code></li>
+            <li>2. <code>req.Validate()</code></li>
+            <li>3. Branch on <code>req.Stream</code></li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="draggable node xwide" id="decode" data-x="880" data-y="780">
+        <div class="drag-handle"><span class="tag decode">Decode</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>DecodeChatCompletionRequest(r io.Reader)</h3>
+          <div class="file">internal/handler/chatrequest.go:87</div>
+          <ul>
+            <li>Pool get <code>routeChatCompletionRequest</code> (wire DTO)</li>
+            <li><code>json.Decoder.Decode(wire)</code></li>
+            <li>Map messages → <code>providers.Message</code></li>
+            <li>Parse <code>tool_choice</code> JSON</li>
+            <li>Return <code>providers.Request</code></li>
+            <li>Pool put + reset (19 fields, security)</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="draggable node" id="validate" data-x="1380" data-y="820">
+        <div class="drag-handle"><span class="tag decode">Validate</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>req.Validate()</h3>
+          <div class="file">providers/core/chat.go:192</div>
+          <ul>
+            <li>model required</li>
+            <li>messages ≥ 1</li>
+            <li>range checks (temp, top_p, penalties)</li>
+            <li><code>max_tokens &gt; 0</code></li>
+            <li><code>max_completion_tokens &gt; 0</code></li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="draggable node" id="error-node" data-x="1380" data-y="560">
+        <div class="drag-handle"><span class="tag error">Error</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>apierror.WriteOpenAI</h3>
+          <div class="file">internal/apierror</div>
+          <ul>
+            <li>400 decode / validation errors</li>
+            <li>400 model not found</li>
+            <li>Route errors via <code>RouteErrorDetails</code></li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="draggable node" id="wire-dto" data-x="1380" data-y="1080">
+        <div class="drag-handle"><span class="tag decode">Wire DTO</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>routeChatCompletionRequest</h3>
+          <div class="file">chatrequest.go:13</div>
+          <ul>
+            <li>19 fields, 1:1 JSON mapping</li>
+            <li>Pooled via <code>sync.Pool</code></li>
+            <li>Discarded after mapping</li>
+            <li>Both token fields copied to Request</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="draggable node xwide issue-highlight" id="request-obj" data-x="520" data-y="1180">
+        <div class="drag-handle"><span class="tag request">Object</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>providers.Request</h3>
+          <div class="file">providers/core/chat.go:149</div>
+          <div class="field-grid">
+            <div class="section-label">Required</div>
+            <div class="field"><span class="name">Model</span><span class="type">string</span><span class="json-key">"model"</span></div>
+            <div class="field"><span class="name">Messages</span><span class="type">[]Message</span><span class="json-key">"messages"</span></div>
+            <div class="section-label">Sampling</div>
+            <div class="field"><span class="name">Temperature</span><span class="type">*float64</span></div>
+            <div class="field"><span class="name">TopP</span><span class="type">*float64</span></div>
+            <div class="field"><span class="name">N</span><span class="type">*int</span></div>
+            <div class="field"><span class="name">Seed</span><span class="type">*int64</span></div>
+            <div class="section-label">Output limits — issue #141</div>
+            <div class="field issue"><span class="name">MaxTokens</span><span class="type">*int</span><span class="json-key">"max_tokens"</span></div>
+            <div class="field issue"><span class="name">MaxCompletionTokens</span><span class="type">*int</span><span class="json-key">"max_completion_tokens"</span></div>
+            <div class="section-label">Tools / format / misc</div>
+            <div class="field"><span class="name">Tools</span><span class="type">[]Tool</span></div>
+            <div class="field"><span class="name">ToolChoice</span><span class="type">interface{}</span></div>
+            <div class="field"><span class="name">ResponseFormat</span><span class="type">*ResponseFormat</span></div>
+            <div class="field"><span class="name">Stream</span><span class="type">bool</span><span class="json-key">"stream"</span></div>
+            <div class="field"><span class="name">Stop, Penalties, LogProbs…</span><span class="type">…</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="draggable fork-label" id="fork-label" data-x="720" data-y="1480">if req.Stream</div>
+
+      <div class="draggable node wide" id="streaming" data-x="120" data-y="1540">
+        <div class="drag-handle"><span class="tag stream">Streaming</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>req.Stream == true</h3>
+          <div class="file">chat.go:27–44</div>
+          <ul>
+            <li><code>gw.FindByModel(req.Model)</code></li>
+            <li><code>gw.FindStreamingByModel(req.Model)</code></li>
+            <li><code>gw.RouteStream(r.Context(), req)</code></li>
+            <li><code>sse.Write(r.Context(), w, ch)</code></li>
+            <li><em>TODO: provider mapping (next layer)</em></li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="draggable node wide" id="non-streaming" data-x="980" data-y="1540">
+        <div class="drag-handle"><span class="tag nonstream">Non-streaming</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>req.Stream == false</h3>
+          <div class="file">chat.go:47–64</div>
+          <ul>
+            <li><code>gw.FindByModel(req.Model)</code></li>
+            <li><code>gw.Route(r.Context(), req)</code></li>
+            <li>JSON encode <code>*providers.Response</code></li>
+            <li>Header <code>X-Gateway-Overhead-Ms</code></li>
+            <li><em>TODO: provider mapping (next layer)</em></li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="draggable note" id="note" data-x="520" data-y="1540">
+        <div class="drag-handle"><span style="font-size:0.7rem;color:var(--muted)">Note</span><span class="grip">⠿</span></div>
+        <div class="note-body">
+          <strong>Issue #141 checkpoint (ingress only):</strong><br />
+          Both <code>max_tokens</code> and <code>max_completion_tokens</code> survive decode + validation and ride into <code>Route</code> / <code>RouteStream</code> unchanged. The drop happens later in per-provider mapping — not in this handler layer.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <footer>Living doc for issue #141 · edges redraw on drag · also available as Obsidian canvas in .scratch/</footer>
+
+  <script>
+    (function () {
+      const STORAGE_KEY = 'issue141-trace-graph-positions-v3';
+      const graph = document.getElementById('graph');
+      const viewport = document.getElementById('viewport');
+      const edgesGroup = document.getElementById('edges-group');
+      const draggables = () => graph.querySelectorAll('.draggable');
+
+      // Edge definitions: from → to, optional type (decision|error|issue|dep)
+      const EDGES = [
+        { from: 'bootstrap', to: 'new-router' },
+        { from: 'new-router', to: 'middleware' },
+        { from: 'middleware', to: 'mount-openai' },
+        { from: 'mount-openai', to: 'post-route' },
+        { from: 'post-route', to: 'chat-completions' },
+        { from: 'post-route', to: 'gateway', type: 'dep' },
+        { from: 'chat-completions', to: 'decode' },
+        { from: 'chat-completions', to: 'error-node', type: 'error' },
+        { from: 'decode', to: 'wire-dto', type: 'dep' },
+        { from: 'decode', to: 'error-node', type: 'error' },
+        { from: 'decode', to: 'validate' },
+        { from: 'validate', to: 'error-node', type: 'error' },
+        { from: 'validate', to: 'request-obj' },
+        { from: 'wire-dto', to: 'request-obj', type: 'dep' },
+        { from: 'request-obj', to: 'fork-label', type: 'decision' },
+        { from: 'request-obj', to: 'note', type: 'dep' },
+        { from: 'fork-label', to: 'streaming', type: 'decision' },
+        { from: 'fork-label', to: 'non-streaming', type: 'decision' },
+        { from: 'gateway', to: 'streaming', type: 'dep' },
+        { from: 'gateway', to: 'non-streaming', type: 'dep' },
+      ];
+
+      const defaults = {};
+      draggables().forEach(el => {
+        defaults[el.id] = {
+          x: parseFloat(el.dataset.x) || 0,
+          y: parseFloat(el.dataset.y) || 0,
+        };
+      });
+
+      function getNode(id) {
+        return document.getElementById(id);
+      }
+
+      function nodeRect(el) {
+        return {
+          x: parseFloat(el.dataset.x) || 0,
+          y: parseFloat(el.dataset.y) || 0,
+          w: el.offsetWidth,
+          h: el.offsetHeight,
+        };
+      }
+
+      function anchor(rect, side) {
+        switch (side) {
+          case 'top': return { x: rect.x + rect.w / 2, y: rect.y };
+          case 'bottom': return { x: rect.x + rect.w / 2, y: rect.y + rect.h };
+          case 'left': return { x: rect.x, y: rect.y + rect.h / 2 };
+          case 'right': return { x: rect.x + rect.w, y: rect.y + rect.h / 2 };
+          default: return { x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 };
+        }
+      }
+
+      function pickSides(fromRect, toRect) {
+        const fcx = fromRect.x + fromRect.w / 2;
+        const fcy = fromRect.y + fromRect.h / 2;
+        const tcx = toRect.x + toRect.w / 2;
+        const tcy = toRect.y + toRect.h / 2;
+        const dx = tcx - fcx;
+        const dy = tcy - fcy;
+
+        if (Math.abs(dx) > Math.abs(dy)) {
+          return dx > 0
+            ? { from: 'right', to: 'left' }
+            : { from: 'left', to: 'right' };
+        }
+        return dy > 0
+          ? { from: 'bottom', to: 'top' }
+          : { from: 'top', to: 'bottom' };
+      }
+
+      function bezierPath(p1, p2, fromSide, toSide) {
+        const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+        const offset = Math.min(120, Math.max(40, dist * 0.35));
+
+        const cp1 = { ...p1 };
+        const cp2 = { ...p2 };
+
+        if (fromSide === 'bottom') cp1.y += offset;
+        if (fromSide === 'top') cp1.y -= offset;
+        if (fromSide === 'right') cp1.x += offset;
+        if (fromSide === 'left') cp1.x -= offset;
+
+        if (toSide === 'bottom') cp2.y += offset;
+        if (toSide === 'top') cp2.y -= offset;
+        if (toSide === 'right') cp2.x += offset;
+        if (toSide === 'left') cp2.x -= offset;
+
+        return `M ${p1.x} ${p1.y} C ${cp1.x} ${cp1.y}, ${cp2.x} ${cp2.y}, ${p2.x} ${p2.y}`;
+      }
+
+      function redrawEdges() {
+        edgesGroup.innerHTML = '';
+        EDGES.forEach(({ from, to, type }) => {
+          const fromEl = getNode(from);
+          const toEl = getNode(to);
+          if (!fromEl || !toEl) return;
+
+          const fromRect = nodeRect(fromEl);
+          const toRect = nodeRect(toEl);
+          const sides = pickSides(fromRect, toRect);
+          const p1 = anchor(fromRect, sides.from);
+          const p2 = anchor(toRect, sides.to);
+
+          const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+          path.setAttribute('d', bezierPath(p1, p2, sides.from, sides.to));
+          path.setAttribute('class', 'edge' + (type ? ' ' + type : ''));
+          edgesGroup.appendChild(path);
+        });
+      }
+
+      function applyPosition(el, x, y) {
+        el.style.left = x + 'px';
+        el.style.top = y + 'px';
+        el.dataset.x = String(x);
+        el.dataset.y = String(y);
+        redrawEdges();
+      }
+
+      function loadPositions() {
+        let saved = {};
+        try { saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); } catch (_) {}
+        draggables().forEach(el => {
+          const pos = saved[el.id] || defaults[el.id] || { x: 0, y: 0 };
+          el.style.left = pos.x + 'px';
+          el.style.top = pos.y + 'px';
+          el.dataset.x = String(pos.x);
+          el.dataset.y = String(pos.y);
+        });
+        redrawEdges();
+      }
+
+      function savePositions() {
+        const positions = {};
+        draggables().forEach(el => {
+          positions[el.id] = {
+            x: parseFloat(el.dataset.x) || 0,
+            y: parseFloat(el.dataset.y) || 0,
+          };
+        });
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(positions));
+      }
+
+      function resetLayout() {
+        localStorage.removeItem(STORAGE_KEY);
+        draggables().forEach(el => {
+          const pos = defaults[el.id];
+          applyPosition(el, pos.x, pos.y);
+        });
+        fitView();
+      }
+
+      function fitView() {
+        let minX = Infinity, minY = Infinity;
+        draggables().forEach(el => {
+          minX = Math.min(minX, parseFloat(el.dataset.x) || 0);
+          minY = Math.min(minY, parseFloat(el.dataset.y) || 0);
+        });
+        viewport.scrollTo({ left: Math.max(0, minX - 40), top: Math.max(0, minY - 40), behavior: 'smooth' });
+      }
+
+      let active = null, startX = 0, startY = 0, originX = 0, originY = 0;
+
+      graph.addEventListener('pointerdown', (e) => {
+        const handle = e.target.closest('.drag-handle, .fork-label');
+        if (!handle) return;
+        const el = handle.closest('.draggable');
+        if (!el) return;
+        e.preventDefault();
+        e.stopPropagation();
+        active = el;
+        active.classList.add('dragging');
+        startX = e.clientX;
+        startY = e.clientY;
+        originX = parseFloat(active.dataset.x) || 0;
+        originY = parseFloat(active.dataset.y) || 0;
+      });
+
+      window.addEventListener('pointermove', (e) => {
+        if (!active) return;
+        applyPosition(active, originX + (e.clientX - startX), originY + (e.clientY - startY));
+      });
+
+      window.addEventListener('pointerup', () => {
+        if (!active) return;
+        active.classList.remove('dragging');
+        active = null;
+        savePositions();
+      });
+
+      let panning = false, panStartX = 0, panStartY = 0, scrollLeft = 0, scrollTop = 0;
+      viewport.addEventListener('pointerdown', (e) => {
+        if (e.target.closest('.draggable')) return;
+        panning = true;
+        viewport.classList.add('panning');
+        panStartX = e.clientX;
+        panStartY = e.clientY;
+        scrollLeft = viewport.scrollLeft;
+        scrollTop = viewport.scrollTop;
+      });
+      window.addEventListener('pointermove', (e) => {
+        if (!panning) return;
+        viewport.scrollLeft = scrollLeft - (e.clientX - panStartX);
+        viewport.scrollTop = scrollTop - (e.clientY - panStartY);
+      });
+      window.addEventListener('pointerup', () => {
+        panning = false;
+        viewport.classList.remove('panning');
+      });
+
+      document.getElementById('reset-layout').addEventListener('click', resetLayout);
+      document.getElementById('fit-view').addEventListener('click', fitView);
+
+      loadPositions();
+      window.addEventListener('resize', redrawEdges);
+      requestAnimationFrame(fitView);
+    })();
+  </script>
+</body>
+</html>

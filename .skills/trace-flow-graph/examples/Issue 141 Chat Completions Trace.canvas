@@ -1,0 +1,186 @@
+{
+  "nodes": [
+    {
+      "id": "bootstrap",
+      "type": "text",
+      "text": "## bootstrap.Run()\n`internal/bootstrap/bootstrap.go`\n\n- Builds registry, key store, config\n- Creates `*Gateway`\n- Calls `httpserver.NewRouter(..., gw, ...)`",
+      "x": -920,
+      "y": -680,
+      "width": 300,
+      "height": 180,
+      "color": "4"
+    },
+    {
+      "id": "new-router",
+      "type": "text",
+      "text": "## NewRouter(...)\n`internal/httpserver/router.go:31`\n\n- `ensureGateway(gw, registry)`\n- `chi.NewRouter()`\n- Middleware stack\n- **mountOpenAIRoutes(r, gw, ...)**",
+      "x": -920,
+      "y": -460,
+      "width": 300,
+      "height": 200,
+      "color": "4"
+    },
+    {
+      "id": "middleware",
+      "type": "text",
+      "text": "## Global chi stack\n`router.go:52–68`\n\n- OTel, logging, recover\n- CORS, rate-limit",
+      "x": -920,
+      "y": -220,
+      "width": 300,
+      "height": 160,
+      "color": "4"
+    },
+    {
+      "id": "mount-openai",
+      "type": "text",
+      "text": "## mountOpenAIRoutes()\n`router.go:194`\n\n- ProxyAuth middleware\n- **POST /v1/chat/completions**\n- GET /v1/models, other /v1/*",
+      "x": -920,
+      "y": 0,
+      "width": 300,
+      "height": 180,
+      "color": "4"
+    },
+    {
+      "id": "post-route",
+      "type": "text",
+      "text": "## POST /v1/chat/completions\n`router.go:200`\n\n`r.Post(..., handler.ChatCompletions(gw))`\n\n- Auth required\n- Closes over `*Gateway`",
+      "x": -920,
+      "y": 240,
+      "width": 300,
+      "height": 180,
+      "color": "4"
+    },
+    {
+      "id": "gateway",
+      "type": "text",
+      "text": "## *aigateway.Gateway\n`gateway.go:51`\n\n- RWMutex + provider map\n- Strategy + plugins\n- `Route(ctx, req)`\n- `RouteStream(ctx, req)`\n- FindByModel / FindStreamingByModel",
+      "x": -920,
+      "y": 480,
+      "width": 300,
+      "height": 220,
+      "color": "6"
+    },
+    {
+      "id": "chat-completions",
+      "type": "text",
+      "text": "## ChatCompletions(gw)\n`internal/handler/chat.go:14`\n\n1. `DecodeChatCompletionRequest(r.Body)`\n2. `req.Validate()`\n3. Branch on `req.Stream`",
+      "x": -500,
+      "y": 160,
+      "width": 300,
+      "height": 200,
+      "color": "2"
+    },
+    {
+      "id": "decode",
+      "type": "text",
+      "text": "## DecodeChatCompletionRequest\n`internal/handler/chatrequest.go:87`\n\n- Pool get wire DTO\n- JSON decode\n- Map messages\n- Return `providers.Request`",
+      "x": -100,
+      "y": 40,
+      "width": 340,
+      "height": 200,
+      "color": "5"
+    },
+    {
+      "id": "wire-dto",
+      "type": "text",
+      "text": "## routeChatCompletionRequest\n`chatrequest.go:13`\n\nWire DTO — 19 fields\nBoth token fields copied out",
+      "x": 320,
+      "y": 340,
+      "width": 260,
+      "height": 160,
+      "color": "5"
+    },
+    {
+      "id": "validate",
+      "type": "text",
+      "text": "## req.Validate()\n`providers/core/chat.go:192`\n\n- model, messages required\n- `max_tokens > 0`\n- **`max_completion_tokens > 0`**",
+      "x": 320,
+      "y": 80,
+      "width": 260,
+      "height": 180,
+      "color": "5"
+    },
+    {
+      "id": "error-node",
+      "type": "text",
+      "text": "## apierror.WriteOpenAI\n\n400 decode / validation\n400 model not found\nRoute errors",
+      "x": 320,
+      "y": -180,
+      "width": 260,
+      "height": 160,
+      "color": "1"
+    },
+    {
+      "id": "request-obj",
+      "type": "text",
+      "text": "## providers.Request\n`providers/core/chat.go:149`\n\n**Output limits (#141):**\n- `MaxTokens` → `\"max_tokens\"`\n- `MaxCompletionTokens` → `\"max_completion_tokens\"`\n\nAlso: Model, Messages, Stream, Tools…\n\n✅ Both survive decode + validation\n❌ Drop happens in provider layer",
+      "x": -460,
+      "y": 440,
+      "width": 380,
+      "height": 280,
+      "color": "3"
+    },
+    {
+      "id": "fork-label",
+      "type": "text",
+      "text": "**if req.Stream**",
+      "x": -260,
+      "y": 780,
+      "width": 160,
+      "height": 60,
+      "color": "5"
+    },
+    {
+      "id": "streaming",
+      "type": "text",
+      "text": "## req.Stream == true\n`chat.go:27–44`\n\n- FindByModel\n- FindStreamingByModel\n- **RouteStream(ctx, req)**\n- sse.Write\n\nTODO: provider mapping",
+      "x": -860,
+      "y": 860,
+      "width": 300,
+      "height": 200,
+      "color": "5"
+    },
+    {
+      "id": "non-streaming",
+      "type": "text",
+      "text": "## req.Stream == false\n`chat.go:47–64`\n\n- FindByModel\n- **Route(ctx, req)**\n- JSON encode response\n\nTODO: provider mapping",
+      "x": 0,
+      "y": 860,
+      "width": 300,
+      "height": 200,
+      "color": "2"
+    },
+    {
+      "id": "note",
+      "type": "text",
+      "text": "**Issue #141 checkpoint (ingress):**\nBoth token fields ride into Route / RouteStream unchanged. Drop is per-provider.",
+      "x": -460,
+      "y": 860,
+      "width": 300,
+      "height": 140,
+      "color": "3"
+    }
+  ],
+  "edges": [
+    { "id": "e1", "fromNode": "bootstrap", "fromSide": "bottom", "toNode": "new-router", "toSide": "top" },
+    { "id": "e2", "fromNode": "new-router", "fromSide": "bottom", "toNode": "middleware", "toSide": "top" },
+    { "id": "e3", "fromNode": "middleware", "fromSide": "bottom", "toNode": "mount-openai", "toSide": "top" },
+    { "id": "e4", "fromNode": "mount-openai", "fromSide": "bottom", "toNode": "post-route", "toSide": "top" },
+    { "id": "e5", "fromNode": "post-route", "fromSide": "right", "toNode": "chat-completions", "toSide": "left" },
+    { "id": "e6", "fromNode": "post-route", "fromSide": "bottom", "toNode": "gateway", "toSide": "top", "color": "6" },
+    { "id": "e7", "fromNode": "chat-completions", "fromSide": "right", "toNode": "decode", "toSide": "left" },
+    { "id": "e8", "fromNode": "chat-completions", "fromSide": "top", "toNode": "error-node", "toSide": "left", "color": "1" },
+    { "id": "e9", "fromNode": "decode", "fromSide": "right", "toNode": "validate", "toSide": "left" },
+    { "id": "e10", "fromNode": "decode", "fromSide": "top", "toNode": "error-node", "toSide": "bottom", "color": "1" },
+    { "id": "e11", "fromNode": "decode", "fromSide": "bottom", "toNode": "wire-dto", "toSide": "top", "color": "6" },
+    { "id": "e12", "fromNode": "validate", "fromSide": "top", "toNode": "error-node", "toSide": "bottom", "color": "1" },
+    { "id": "e13", "fromNode": "validate", "fromSide": "bottom", "toNode": "request-obj", "toSide": "right" },
+    { "id": "e14", "fromNode": "wire-dto", "fromSide": "left", "toNode": "request-obj", "toSide": "right", "color": "6" },
+    { "id": "e15", "fromNode": "request-obj", "fromSide": "bottom", "toNode": "fork-label", "toSide": "top", "color": "5" },
+    { "id": "e16", "fromNode": "request-obj", "fromSide": "bottom", "toNode": "note", "toSide": "top", "color": "3" },
+    { "id": "e17", "fromNode": "fork-label", "fromSide": "left", "toNode": "streaming", "toSide": "top", "color": "5" },
+    { "id": "e18", "fromNode": "fork-label", "fromSide": "right", "toNode": "non-streaming", "toSide": "top", "color": "5" },
+    { "id": "e19", "fromNode": "gateway", "fromSide": "bottom", "toNode": "streaming", "toSide": "left", "color": "6" },
+    { "id": "e20", "fromNode": "gateway", "fromSide": "right", "toNode": "non-streaming", "toSide": "left", "color": "6" }
+  ]
+}
