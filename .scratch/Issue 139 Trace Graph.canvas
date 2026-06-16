@@ -1,0 +1,338 @@
+{
+  "nodes": [
+    {
+      "id": "client-post",
+      "type": "text",
+      "text": "## POST /v1/chat/completions\n`Client request`\n\n- tools[] definitions\n- tool_choice\n- messages[].tool_calls\n- role=tool + tool_call_id",
+      "x": -1400,
+      "y": -400,
+      "width": 300,
+      "height": 200,
+      "color": "4"
+    },
+    {
+      "id": "chat-handler",
+      "type": "text",
+      "text": "## ChatCompletions(gw)\n`internal/handler/chat.go:14`\n\n- DecodeChatCompletionRequest\n- req.Validate()\n- Branch on req.Stream",
+      "x": -1000,
+      "y": -400,
+      "width": 300,
+      "height": 200,
+      "color": "2"
+    },
+    {
+      "id": "decode-request",
+      "type": "text",
+      "text": "## DecodeChatCompletionRequest ✓\n`internal/handler/chatrequest.go:87`\n\n- **Tools → wire.Tools ✓**\n- **ToolChoice ✓**\n- **ToolCalls / ToolCallID ✓**\n- Returns providers.Request",
+      "x": -600,
+      "y": -400,
+      "width": 300,
+      "height": 220,
+      "color": "3"
+    },
+    {
+      "id": "validate-request",
+      "type": "text",
+      "text": "## Request.Validate()\n`providers/core/chat.go:192`\n\n- model + messages required\n- Does not validate tools\n- No tool-field stripping",
+      "x": -600,
+      "y": -120,
+      "width": 280,
+      "height": 180,
+      "color": "5"
+    },
+    {
+      "id": "core-request",
+      "type": "text",
+      "text": "## providers.Request\n`providers/core/chat.go:149`\n\n- Tools []Tool\n- ToolChoice interface{}\n- Messages []Message\n- Stream bool",
+      "x": -200,
+      "y": -400,
+      "width": 280,
+      "height": 200,
+      "color": "5"
+    },
+    {
+      "id": "stream-fork",
+      "type": "text",
+      "text": "## req.Stream ?\n\n**decision fork**",
+      "x": -1000,
+      "y": 80,
+      "width": 200,
+      "height": 80,
+      "color": "5"
+    },
+    {
+      "id": "route-ns",
+      "type": "text",
+      "text": "## Gateway.Route()\n`gateway.go:397`\n\n- Observability span\n- resolveAlias(req)\n- Pass-through full req",
+      "x": -1400,
+      "y": 240,
+      "width": 280,
+      "height": 180,
+      "color": "6"
+    },
+    {
+      "id": "plugins-before-ns",
+      "type": "text",
+      "text": "## before_request plugins\n`gateway.go:432`\n\n- plugin.NewContext(&req)\n- Tools not stripped by default",
+      "x": -1400,
+      "y": 480,
+      "width": 280,
+      "height": 160,
+      "color": "6"
+    },
+    {
+      "id": "mcp-inject",
+      "type": "text",
+      "text": "## MCP tool injection\n`gateway.go:450`\n\n- AllTools() from registry\n- Appends to req.Tools\n- Forces Stream=false for loop",
+      "x": -1400,
+      "y": 700,
+      "width": 280,
+      "height": 180,
+      "color": "6"
+    },
+    {
+      "id": "strategy-execute",
+      "type": "text",
+      "text": "## Strategy.Execute()\n`internal/strategies/*.go`\n\n- provider.Complete(ctx, req)\n- Full req passed unchanged",
+      "x": -1000,
+      "y": 700,
+      "width": 280,
+      "height": 160,
+      "color": "6"
+    },
+    {
+      "id": "mcp-loop",
+      "type": "text",
+      "text": "## MCP agentic loop\n`gateway.go:547`\n\n- ShouldContinueLoop → ToolCalls > 0\n- **Never runs if provider drops tool_calls**",
+      "x": -1000,
+      "y": 920,
+      "width": 300,
+      "height": 160,
+      "color": "3"
+    },
+    {
+      "id": "json-response",
+      "type": "text",
+      "text": "## JSON Response\n`internal/handler/chat.go:64`\n\n- Choices[].Message.ToolCalls\n- Often empty on native paths",
+      "x": -1000,
+      "y": 1140,
+      "width": 280,
+      "height": 160,
+      "color": "2"
+    },
+    {
+      "id": "route-stream",
+      "type": "text",
+      "text": "## Gateway.RouteStream()\n`gateway.go:1163`\n\n- Pass-through full req\n- IsStream span attribute",
+      "x": -600,
+      "y": 240,
+      "width": 280,
+      "height": 160,
+      "color": "6"
+    },
+    {
+      "id": "mcp-redirect",
+      "type": "text",
+      "text": "## MCP redirect check\n`gateway.go:1203`\n\n- HasServers() → Route()\n- responseStream() copies ToolCalls ✓",
+      "x": -600,
+      "y": 480,
+      "width": 280,
+      "height": 160,
+      "color": "6"
+    },
+    {
+      "id": "resolve-stream-provider",
+      "type": "text",
+      "text": "## resolveStreamingProviderLocked\n`gateway.go:1446`\n\n- sp.CompleteStream(ctx, req)",
+      "x": -600,
+      "y": 700,
+      "width": 300,
+      "height": 140,
+      "color": "6"
+    },
+    {
+      "id": "streamwrap-meter",
+      "type": "text",
+      "text": "## streamwrap.Meter() ✓\n`internal/streamwrap/wrap.go:91`\n\n- Forwards chunks unchanged\n- Accumulates ToolCalls in applyChunkToResponse",
+      "x": -600,
+      "y": 920,
+      "width": 300,
+      "height": 160,
+      "color": "5"
+    },
+    {
+      "id": "sse-write",
+      "type": "text",
+      "text": "## sse.Write() ✓\n`internal/sse/sse.go:29`\n\n- JSON-encodes StreamChunk\n- Not the drop point",
+      "x": -600,
+      "y": 1140,
+      "width": 260,
+      "height": 140,
+      "color": "5"
+    },
+    {
+      "id": "provider-complete",
+      "type": "text",
+      "text": "## provider.Complete()\n`providers/*/*.go`\n\n- **Translation layer — drop zone #139**\n- 31 provider implementations",
+      "x": -200,
+      "y": 700,
+      "width": 280,
+      "height": 160,
+      "color": "3"
+    },
+    {
+      "id": "provider-complete-stream",
+      "type": "text",
+      "text": "## provider.CompleteStream()\n`providers/*/*.go`\n\n- **Request + delta drop zone #139**",
+      "x": -200,
+      "y": 920,
+      "width": 280,
+      "height": 140,
+      "color": "3"
+    },
+    {
+      "id": "openai-complete",
+      "type": "text",
+      "text": "## openai.Complete ✓\n`providers/openai/openai.go:264`\n\n- json.Marshal(req) full pass-through\n- Tools + ToolChoice + ToolCalls ✓",
+      "x": 200,
+      "y": 480,
+      "width": 280,
+      "height": 180,
+      "color": "2"
+    },
+    {
+      "id": "openai-stream",
+      "type": "text",
+      "text": "## openai.CompleteStream ⚠\n`providers/openai/openai.go:326`\n\n- applyParams → Tools ✓ ToolChoice ✗\n- **buildMessages drops assistant ToolCalls**\n- **Delta maps Content only**",
+      "x": 200,
+      "y": 700,
+      "width": 300,
+      "height": 200,
+      "color": "3"
+    },
+    {
+      "id": "build-messages",
+      "type": "text",
+      "text": "## buildMessages() ✗\n`providers/openai/openai.go:416`\n\n- AssistantMessage(content) only\n- **ToolCalls not forwarded**\n- Breaks multi-turn round-trip",
+      "x": 560,
+      "y": 700,
+      "width": 280,
+      "height": 180,
+      "color": "3"
+    },
+    {
+      "id": "ollama-cloud",
+      "type": "text",
+      "text": "## ollama_cloud (partial ✓)\n`providers/ollama_cloud/ollama_cloud.go:340`\n\n- Tools ✓ · Stream ToolCalls ✓\n- ToolChoice ✗",
+      "x": 200,
+      "y": 960,
+      "width": 280,
+      "height": 160,
+      "color": "2"
+    },
+    {
+      "id": "slim-oai-compat",
+      "type": "text",
+      "text": "## Slim OpenAI-compat (~20) ✗\n`groq · openrouter · mistral · azure_openai`\n\n- **tools / tool_choice never sent**\n- Stream delta: Role+Content only",
+      "x": 200,
+      "y": 1180,
+      "width": 320,
+      "height": 180,
+      "color": "3"
+    },
+    {
+      "id": "anthropic-native",
+      "type": "text",
+      "text": "## anthropic native ✗\n`providers/anthropic/anthropic.go:101`\n\n- anthropicRequest: no tools\n- buildMessages: text only\n- Response: text blocks only",
+      "x": 560,
+      "y": 240,
+      "width": 280,
+      "height": 180,
+      "color": "3"
+    },
+    {
+      "id": "gemini-native",
+      "type": "text",
+      "text": "## gemini native ✗\n`providers/gemini/gemini.go:110`\n\n- No functionDeclarations\n- convertToGemini: text only",
+      "x": 560,
+      "y": 480,
+      "width": 280,
+      "height": 160,
+      "color": "3"
+    },
+    {
+      "id": "bedrock-native",
+      "type": "text",
+      "text": "## bedrock / claude ✗\n`providers/bedrock/bedrock.go:163`\n\n- bedrockAnthropicRequest: no tools\n- Stream: text_delta only",
+      "x": 900,
+      "y": 240,
+      "width": 280,
+      "height": 160,
+      "color": "3"
+    },
+    {
+      "id": "cohere-native",
+      "type": "text",
+      "text": "## cohere native ✗\n`providers/cohere/cohere.go:94`\n\n- cohereRequest: no tools\n- Response: text blocks only",
+      "x": 900,
+      "y": 480,
+      "width": 280,
+      "height": 160,
+      "color": "3"
+    },
+    {
+      "id": "core-message-json",
+      "type": "text",
+      "text": "## Message.MarshalJSON\n`providers/core/chat.go:73`\n\n- Serializes tool_calls, tool_call_id\n- Used when provider embeds core.Message\n- Not enough without top-level tools",
+      "x": -200,
+      "y": -120,
+      "width": 300,
+      "height": 180,
+      "color": "6"
+    },
+    {
+      "id": "issue-checkpoint",
+      "type": "text",
+      "text": "## Issue #139 checkpoint\n\nTools survive HTTP decode + gateway. Silent failure at **provider translation**.\n\nNative structs omit tools; slim wrappers omit top-level tools; OpenAI stream drops assistant ToolCalls + deltas.\n\nMCP loop never fires → text-only, no error.\n\n**Probes:** decode → pre-provider req → outbound HTTP body → raw API response → StreamChunk.Delta.ToolCalls",
+      "x": -1400,
+      "y": 1380,
+      "width": 420,
+      "height": 280,
+      "color": "3"
+    }
+  ],
+  "edges": [
+    { "id": "e1", "fromNode": "client-post", "fromSide": "right", "toNode": "chat-handler", "toSide": "left" },
+    { "id": "e2", "fromNode": "chat-handler", "fromSide": "right", "toNode": "decode-request", "toSide": "left" },
+    { "id": "e3", "fromNode": "decode-request", "fromSide": "bottom", "toNode": "validate-request", "toSide": "top" },
+    { "id": "e4", "fromNode": "decode-request", "fromSide": "right", "toNode": "core-request", "toSide": "left", "color": "6" },
+    { "id": "e5", "fromNode": "chat-handler", "fromSide": "bottom", "toNode": "stream-fork", "toSide": "top", "color": "5" },
+    { "id": "e6", "fromNode": "stream-fork", "fromSide": "left", "toNode": "route-ns", "toSide": "top", "color": "5" },
+    { "id": "e7", "fromNode": "stream-fork", "fromSide": "right", "toNode": "route-stream", "toSide": "top", "color": "5" },
+    { "id": "e8", "fromNode": "route-ns", "fromSide": "bottom", "toNode": "plugins-before-ns", "toSide": "top" },
+    { "id": "e9", "fromNode": "plugins-before-ns", "fromSide": "bottom", "toNode": "mcp-inject", "toSide": "top" },
+    { "id": "e10", "fromNode": "mcp-inject", "fromSide": "right", "toNode": "strategy-execute", "toSide": "left" },
+    { "id": "e11", "fromNode": "strategy-execute", "fromSide": "right", "toNode": "provider-complete", "toSide": "left" },
+    { "id": "e12", "fromNode": "provider-complete", "fromSide": "bottom", "toNode": "mcp-loop", "toSide": "top" },
+    { "id": "e13", "fromNode": "mcp-loop", "fromSide": "bottom", "toNode": "json-response", "toSide": "top" },
+    { "id": "e14", "fromNode": "route-stream", "fromSide": "bottom", "toNode": "mcp-redirect", "toSide": "top" },
+    { "id": "e15", "fromNode": "mcp-redirect", "fromSide": "left", "toNode": "route-ns", "toSide": "right", "color": "5" },
+    { "id": "e16", "fromNode": "mcp-redirect", "fromSide": "bottom", "toNode": "resolve-stream-provider", "toSide": "top", "color": "5" },
+    { "id": "e17", "fromNode": "resolve-stream-provider", "fromSide": "right", "toNode": "provider-complete-stream", "toSide": "left" },
+    { "id": "e18", "fromNode": "provider-complete-stream", "fromSide": "bottom", "toNode": "streamwrap-meter", "toSide": "top" },
+    { "id": "e19", "fromNode": "streamwrap-meter", "fromSide": "bottom", "toNode": "sse-write", "toSide": "top" },
+    { "id": "e20", "fromNode": "provider-complete", "fromSide": "right", "toNode": "openai-complete", "toSide": "left" },
+    { "id": "e21", "fromNode": "provider-complete", "fromSide": "right", "toNode": "anthropic-native", "toSide": "left", "color": "3" },
+    { "id": "e22", "fromNode": "provider-complete", "fromSide": "right", "toNode": "gemini-native", "toSide": "left", "color": "3" },
+    { "id": "e23", "fromNode": "provider-complete", "fromSide": "right", "toNode": "bedrock-native", "toSide": "left", "color": "3" },
+    { "id": "e24", "fromNode": "provider-complete", "fromSide": "right", "toNode": "cohere-native", "toSide": "left", "color": "3" },
+    { "id": "e25", "fromNode": "provider-complete", "fromSide": "right", "toNode": "slim-oai-compat", "toSide": "left", "color": "3" },
+    { "id": "e26", "fromNode": "provider-complete", "fromSide": "right", "toNode": "ollama-cloud", "toSide": "left" },
+    { "id": "e27", "fromNode": "provider-complete-stream", "fromSide": "right", "toNode": "openai-stream", "toSide": "left", "color": "3" },
+    { "id": "e28", "fromNode": "openai-stream", "fromSide": "right", "toNode": "build-messages", "toSide": "left", "color": "3" },
+    { "id": "e29", "fromNode": "core-request", "fromSide": "bottom", "toNode": "core-message-json", "toSide": "top", "color": "6" },
+    { "id": "e30", "fromNode": "mcp-loop", "fromSide": "bottom", "toNode": "issue-checkpoint", "toSide": "top", "color": "3" },
+    { "id": "e31", "fromNode": "anthropic-native", "fromSide": "bottom", "toNode": "issue-checkpoint", "toSide": "right", "color": "3" },
+    { "id": "e32", "fromNode": "openai-stream", "fromSide": "bottom", "toNode": "issue-checkpoint", "toSide": "right", "color": "3" }
+  ]
+}

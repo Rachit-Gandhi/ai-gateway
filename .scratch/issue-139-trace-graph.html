@@ -1,0 +1,700 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Issue #139 — Tool / Function Calling Trace</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --panel: #161b22;
+      --border: #30363d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --router: #3fb950;
+      --handler: #f0883e;
+      --gateway: #a371f7;
+      --decode: #58a6ff;
+      --request: #79c0ff;
+      --stream: #56d4dd;
+      --nonstream: #f0883e;
+      --error: #f85149;
+      --note-bg: #1c2128;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: ui-sans-serif, system-ui, sans-serif; background: var(--bg); color: var(--text); height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+    header {
+      position: sticky; top: 0; z-index: 100;
+      background: var(--panel); border-bottom: 1px solid var(--border);
+      padding: 12px 20px; display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+    }
+    header h1 { font-size: 1rem; font-weight: 600; margin-right: 8px; }
+    header .subtitle { color: var(--muted); font-size: 0.85rem; }
+    .legend { display: flex; flex-wrap: wrap; gap: 8px; font-size: 0.75rem; }
+    .legend span { padding: 2px 8px; border-radius: 4px; border: 1px solid var(--border); }
+    .tag-router { background: rgba(63,185,80,.15); color: var(--router); }
+    .tag-handler { background: rgba(240,136,62,.15); color: var(--handler); }
+    .tag-gateway { background: rgba(163,113,247,.15); color: var(--gateway); }
+    .tag-decode { background: rgba(88,166,255,.15); color: var(--decode); }
+    .tag-request { background: rgba(121,192,255,.15); color: var(--request); }
+    .tag-stream { background: rgba(86,212,221,.15); color: var(--stream); }
+    .tag-nonstream { background: rgba(240,136,62,.15); color: var(--nonstream); }
+    .tag-note { background: rgba(255,123,114,.15); color: #ff7b72; }
+    .controls { margin-left: auto; display: flex; gap: 8px; }
+    button {
+      background: var(--panel); border: 1px solid var(--border); color: var(--text);
+      padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 0.8rem;
+    }
+    button:hover { background: #21262d; }
+    .hint { width: 100%; font-size: 0.75rem; color: var(--muted); }
+    .viewport { flex: 1; overflow: auto; position: relative; cursor: grab; }
+    .viewport.panning { cursor: grabbing; }
+    #graph { position: relative; width: 3200px; height: 2200px; }
+    #edges-svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 1; }
+    .draggable { position: absolute; z-index: 2; user-select: none; }
+    .node {
+      width: 280px; background: var(--panel); border: 1px solid var(--border);
+      border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,.35);
+    }
+    .node.wide { width: 300px; }
+    .node.xwide { width: 400px; }
+    .node.issue-highlight { border-color: #ff7b72; box-shadow: 0 0 0 1px rgba(255,123,114,.4); }
+    .drag-handle {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 8px 10px; border-bottom: 1px solid var(--border); cursor: grab;
+      border-radius: 8px 8px 0 0; background: rgba(255,255,255,.03);
+    }
+    .drag-handle:active { cursor: grabbing; }
+    .grip { color: var(--muted); font-size: 1rem; }
+    .node-body { padding: 10px 12px 12px; font-size: 0.78rem; line-height: 1.45; }
+    .node-body h3 { font-size: 0.88rem; margin-bottom: 6px; font-weight: 600; }
+    .file { font-family: ui-monospace, monospace; font-size: 0.72rem; color: var(--muted); margin-bottom: 8px; word-break: break-all; }
+    .node-body ul { padding-left: 16px; }
+    .node-body li { margin-bottom: 3px; }
+    .node-body li.hl { color: #ff7b72; font-weight: 500; }
+    .fork-label {
+      padding: 6px 14px; background: rgba(88,166,255,.12); border: 1px dashed #58a6ff;
+      border-radius: 20px; font-size: 0.8rem; color: #58a6ff; cursor: grab;
+    }
+    .note {
+      width: 400px; background: var(--note-bg); border: 1px solid #ff7b72;
+      border-radius: 8px;
+    }
+    .note-body { padding: 12px; font-size: 0.78rem; line-height: 1.5; }
+    .edge { stroke: #4a5d78; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+    .edge.decision { stroke-dasharray: 7 5; stroke: #6ea8fe; marker-end: url(#arrow-blue); }
+    .edge.error { stroke-dasharray: 5 4; stroke: #f85149; marker-end: url(#arrow-red); }
+    .edge.dep { stroke-dasharray: 3 4; stroke: #a371f7; opacity: 0.85; marker-end: url(#arrow-purple); }
+    .edge.issue { stroke: #ff7b72; stroke-width: 2.5; marker-end: url(#arrow-issue); }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Issue #139 — Tool / Function Calling Trace</h1>
+      <div class="subtitle">ingress → gateway fork → provider translation (investigation only)</div>
+    </div>
+    <div class="legend">
+      <span class="tag-router">router</span>
+      <span class="tag-handler">handler</span>
+      <span class="tag-gateway">gateway</span>
+      <span class="tag-decode">decode</span>
+      <span class="tag-request">request</span>
+      <span class="tag-stream">stream</span>
+      <span class="tag-nonstream">non-stream</span>
+      <span class="tag-note">issue focus</span>
+    </div>
+    <div class="controls">
+      <button type="button" id="reset-layout">Reset layout</button>
+      <button type="button" id="fit-view">Fit to view</button>
+    </div>
+    <div class="hint">Drag node handles to rearrange · pan empty canvas · layout saved to localStorage</div>
+  </header>
+
+  <div class="viewport" id="viewport">
+    <div id="graph">
+      <svg id="edges-svg">
+        <defs>
+          <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#4a5d78"/></marker>
+          <marker id="arrow-blue" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#6ea8fe"/></marker>
+          <marker id="arrow-red" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#f85149"/></marker>
+          <marker id="arrow-purple" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#a371f7"/></marker>
+          <marker id="arrow-issue" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#ff7b72"/></marker>
+        </defs>
+        <g id="edges-group"></g>
+      </svg>
+
+      <!-- INGRESS -->
+      <div class="draggable node" id="client-post" data-x="60" data-y="60">
+        <div class="drag-handle"><span class="tag tag-router">router</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>POST /v1/chat/completions</h3>
+          <div class="file">Client request</div>
+          <ul>
+            <li>tools[] definitions</li>
+            <li>tool_choice</li>
+            <li>messages[].tool_calls</li>
+            <li>messages role=tool + tool_call_id</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="draggable node" id="chat-handler" data-x="400" data-y="60">
+        <div class="drag-handle"><span class="tag tag-handler">handler</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>ChatCompletions(gw)</h3>
+          <div class="file">internal/handler/chat.go:14</div>
+          <ul>
+            <li>DecodeChatCompletionRequest</li>
+            <li>req.Validate()</li>
+            <li>Branch on req.Stream</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="draggable node issue-highlight" id="decode-request" data-x="740" data-y="60">
+        <div class="drag-handle"><span class="tag tag-decode">decode</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>DecodeChatCompletionRequest</h3>
+          <div class="file">internal/handler/chatrequest.go:87</div>
+          <ul>
+            <li class="hl">Tools → wire.Tools ✓</li>
+            <li class="hl">ToolChoice → interface{} ✓</li>
+            <li class="hl">ToolCalls / ToolCallID ✓</li>
+            <li>Returns providers.Request</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="draggable node" id="validate-request" data-x="740" data-y="260">
+        <div class="drag-handle"><span class="tag tag-decode">decode</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>Request.Validate()</h3>
+          <div class="file">providers/core/chat.go:192</div>
+          <ul>
+            <li>model + messages required</li>
+            <li>Does not validate tools</li>
+            <li>No tool-field stripping</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="draggable node wide" id="core-request" data-x="1080" data-y="60">
+        <div class="drag-handle"><span class="tag tag-request">request</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>providers.Request</h3>
+          <div class="file">providers/core/chat.go:149</div>
+          <ul>
+            <li>Tools []Tool</li>
+            <li>ToolChoice interface{}</li>
+            <li>Messages []Message</li>
+            <li>Stream bool</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="draggable fork-label" id="stream-fork" data-x="400" data-y="460">req.Stream ?</div>
+
+      <!-- NON-STREAM -->
+      <div class="draggable node" id="route-ns" data-x="60" data-y="620">
+        <div class="drag-handle"><span class="tag tag-gateway">gateway</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>Gateway.Route()</h3>
+          <div class="file">gateway.go:397</div>
+          <ul>
+            <li>Observability span</li>
+            <li>resolveAlias(req)</li>
+            <li>Pass-through full req</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="draggable node" id="plugins-before-ns" data-x="60" data-y="820">
+        <div class="drag-handle"><span class="tag tag-gateway">gateway</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>before_request plugins</h3>
+          <div class="file">gateway.go:432</div>
+          <ul>
+            <li>plugin.NewContext(&amp;req)</li>
+            <li>May mutate req in-place</li>
+            <li>Tools not stripped by default</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="draggable node" id="mcp-inject" data-x="60" data-y="1020">
+        <div class="drag-handle"><span class="tag tag-gateway">gateway</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>MCP tool injection</h3>
+          <div class="file">gateway.go:450</div>
+          <ul>
+            <li>AllTools() from MCP registry</li>
+            <li>Appends to req.Tools</li>
+            <li>Forces req.Stream=false for loop</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="draggable node" id="strategy-execute" data-x="400" data-y="1020">
+        <div class="drag-handle"><span class="tag tag-gateway">gateway</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>Strategy.Execute(ctx, req)</h3>
+          <div class="file">internal/strategies/*.go</div>
+          <ul>
+            <li>Single / Fallback / LB / …</li>
+            <li>Calls provider.Complete(ctx, req)</li>
+            <li>Full req passed unchanged</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="draggable node" id="mcp-loop" data-x="400" data-y="1220">
+        <div class="drag-handle"><span class="tag tag-gateway">gateway</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>MCP agentic loop</h3>
+          <div class="file">gateway.go:547 · internal/mcp/executor.go</div>
+          <ul>
+            <li>ShouldContinueLoop → ToolCalls &gt; 0</li>
+            <li>ResolvePendingToolCalls</li>
+            <li class="hl">Never runs if provider drops tool_calls</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="draggable node" id="json-response" data-x="400" data-y="1420">
+        <div class="drag-handle"><span class="tag tag-nonstream">nonstream</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>JSON Response</h3>
+          <div class="file">internal/handler/chat.go:64</div>
+          <ul>
+            <li>json.Encode(resp)</li>
+            <li>Choices[].Message.ToolCalls</li>
+            <li>Often empty on native paths</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- STREAM -->
+      <div class="draggable node" id="route-stream" data-x="740" data-y="620">
+        <div class="drag-handle"><span class="tag tag-gateway">gateway</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>Gateway.RouteStream()</h3>
+          <div class="file">gateway.go:1163</div>
+          <ul>
+            <li>Observability span (stream)</li>
+            <li>resolveAlias(req)</li>
+            <li>Pass-through full req</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="draggable node" id="mcp-redirect" data-x="740" data-y="820">
+        <div class="drag-handle"><span class="tag tag-gateway">gateway</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>MCP redirect check</h3>
+          <div class="file">gateway.go:1203</div>
+          <ul>
+            <li>HasServers() → Route() instead</li>
+            <li>responseStream() single chunk</li>
+            <li>ToolCalls copied to delta ✓</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="draggable node" id="resolve-stream-provider" data-x="740" data-y="1020">
+        <div class="drag-handle"><span class="tag tag-gateway">gateway</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>resolveStreamingProviderLocked</h3>
+          <div class="file">gateway.go:1446</div>
+          <ul>
+            <li>Strategy target order</li>
+            <li>Circuit breaker wrap</li>
+            <li>sp.CompleteStream(ctx, req)</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="draggable node" id="streamwrap-meter" data-x="740" data-y="1220">
+        <div class="drag-handle"><span class="tag tag-stream">stream</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>streamwrap.Meter()</h3>
+          <div class="file">internal/streamwrap/wrap.go:91</div>
+          <ul>
+            <li>Forwards chunks unchanged</li>
+            <li>applyChunkToResponse accumulates ToolCalls ✓</li>
+            <li>Does not drop tool deltas</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="draggable node" id="sse-write" data-x="740" data-y="1420">
+        <div class="drag-handle"><span class="tag tag-stream">stream</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>sse.Write()</h3>
+          <div class="file">internal/sse/sse.go:29</div>
+          <ul>
+            <li>JSON-encodes StreamChunk</li>
+            <li>delta.tool_calls preserved if present</li>
+            <li>Not the drop point</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- PROVIDER HUB -->
+      <div class="draggable node" id="provider-complete" data-x="1080" data-y="1020">
+        <div class="drag-handle"><span class="tag tag-handler">handler</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>provider.Complete()</h3>
+          <div class="file">providers/*/…go</div>
+          <ul>
+            <li>Non-streaming provider call</li>
+            <li class="hl">Translation layer — drop zone</li>
+            <li>31 provider implementations</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="draggable node" id="provider-complete-stream" data-x="1080" data-y="1220">
+        <div class="drag-handle"><span class="tag tag-stream">stream</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>provider.CompleteStream()</h3>
+          <div class="file">providers/*/…go</div>
+          <ul>
+            <li>Streaming provider call</li>
+            <li class="hl">Request + delta mapping drop zone</li>
+            <li>Returns &lt;-chan StreamChunk</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- OPENAI -->
+      <div class="draggable node" id="openai-complete" data-x="1420" data-y="820">
+        <div class="drag-handle"><span class="tag tag-handler">handler</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>openai.Complete ✓</h3>
+          <div class="file">providers/openai/openai.go:264</div>
+          <ul>
+            <li>json.Marshal(req) full pass-through</li>
+            <li>Tools + ToolChoice + ToolCalls ✓</li>
+            <li>Response tool_calls decoded ✓</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="draggable node issue-highlight" id="openai-stream" data-x="1420" data-y="1020">
+        <div class="drag-handle"><span class="tag tag-stream">stream</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>openai.CompleteStream ⚠</h3>
+          <div class="file">providers/openai/openai.go:326</div>
+          <ul>
+            <li>applyParams → Tools ✓ ToolChoice ✗</li>
+            <li class="hl">buildMessages drops assistant ToolCalls</li>
+            <li class="hl">Delta maps Content only</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="draggable node issue-highlight" id="build-messages" data-x="1760" data-y="1020">
+        <div class="drag-handle"><span class="tag tag-decode">decode</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>buildMessages()</h3>
+          <div class="file">providers/openai/openai.go:416</div>
+          <ul>
+            <li>AssistantMessage(content) only</li>
+            <li class="hl">ToolCalls not forwarded</li>
+            <li>ToolMessage for role=tool ✓</li>
+            <li>Breaks multi-turn round-trip</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- PARTIAL / SLIM -->
+      <div class="draggable node" id="ollama-cloud" data-x="1420" data-y="1220">
+        <div class="drag-handle"><span class="tag tag-handler">handler</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>ollama_cloud (partial ✓)</h3>
+          <div class="file">providers/ollama_cloud/ollama_cloud.go:340</div>
+          <ul>
+            <li>buildChatRequest → Tools ✓</li>
+            <li>Stream ToolCalls mapped ✓</li>
+            <li>ToolChoice not forwarded</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="draggable node issue-highlight wide" id="slim-oai-compat" data-x="1420" data-y="1420">
+        <div class="drag-handle"><span class="tag tag-handler">handler</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>Slim OpenAI-compat (~20 providers)</h3>
+          <div class="file">e.g. groq · openrouter · mistral · azure_openai</div>
+          <ul>
+            <li class="hl">Local struct: model + messages only</li>
+            <li class="hl">tools / tool_choice never sent</li>
+            <li>core.Message JSON may carry tool_calls in history</li>
+            <li class="hl">Stream delta: Role+Content only</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- NATIVE -->
+      <div class="draggable node issue-highlight" id="anthropic-native" data-x="1760" data-y="620">
+        <div class="drag-handle"><span class="tag tag-handler">handler</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>anthropic native ✗</h3>
+          <div class="file">providers/anthropic/anthropic.go:101</div>
+          <ul>
+            <li>anthropicRequest: no tools field</li>
+            <li>buildMessages: role+content string</li>
+            <li>Response: text blocks only</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="draggable node issue-highlight" id="gemini-native" data-x="1760" data-y="820">
+        <div class="drag-handle"><span class="tag tag-handler">handler</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>gemini native ✗</h3>
+          <div class="file">providers/gemini/gemini.go:110</div>
+          <ul>
+            <li>geminiRequest: contents + genConfig</li>
+            <li>No functionDeclarations / toolConfig</li>
+            <li>convertToGemini: text parts only</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="draggable node issue-highlight" id="bedrock-native" data-x="2100" data-y="620">
+        <div class="drag-handle"><span class="tag tag-handler">handler</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>bedrock / claude ✗</h3>
+          <div class="file">providers/bedrock/bedrock.go:163</div>
+          <ul>
+            <li>bedrockAnthropicRequest: no tools</li>
+            <li>Messages as core.Message (shape mismatch)</li>
+            <li>Stream: text_delta only</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="draggable node issue-highlight" id="cohere-native" data-x="2100" data-y="820">
+        <div class="drag-handle"><span class="tag tag-handler">handler</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>cohere native ✗</h3>
+          <div class="file">providers/cohere/cohere.go:94</div>
+          <ul>
+            <li>cohereRequest: no tools / tool_choice</li>
+            <li>Response parses text blocks only</li>
+            <li>Stream delta: text only</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="draggable node wide" id="core-message-json" data-x="1080" data-y="260">
+        <div class="drag-handle"><span class="tag tag-request">request</span><span class="grip">⠿</span></div>
+        <div class="node-body">
+          <h3>Message.MarshalJSON</h3>
+          <div class="file">providers/core/chat.go:73</div>
+          <ul>
+            <li>Serializes tool_calls, tool_call_id</li>
+            <li>Used when provider embeds core.Message</li>
+            <li>Not enough without top-level tools</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="draggable note xwide" id="issue-checkpoint" data-x="60" data-y="1680">
+        <div class="drag-handle"><span class="tag tag-note">note</span><span class="grip">⠿</span></div>
+        <div class="note-body">
+          <strong>Issue #139 checkpoint</strong><br><br>
+          Tools survive HTTP decode and gateway orchestration. Silent failure occurs at <em>provider translation</em>:
+          native structs omit tools/tool_choice; slim OpenAI-compat wrappers omit top-level tools; OpenAI streaming drops assistant ToolCalls in buildMessages and omits tool_calls deltas.
+          MCP loop never fires when resp.Choices[].ToolCalls is empty → text-only response, no error.
+          <br><br>
+          <strong>Probe order:</strong> decode → pre-provider req → outbound HTTP body → raw API response → StreamChunk.Delta.ToolCalls
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const STORAGE_KEY = 'issue-139-trace-graph-positions-v1';
+    const viewport = document.getElementById('viewport');
+    const graph = document.getElementById('graph');
+    const edgesGroup = document.getElementById('edges-group');
+
+    const EDGES = [
+      { from: 'client-post', to: 'chat-handler' },
+      { from: 'chat-handler', to: 'decode-request' },
+      { from: 'decode-request', to: 'validate-request' },
+      { from: 'validate-request', to: 'core-request', type: 'dep' },
+      { from: 'decode-request', to: 'core-request', type: 'dep' },
+      { from: 'chat-handler', to: 'stream-fork', type: 'decision' },
+      { from: 'stream-fork', to: 'route-ns', type: 'decision' },
+      { from: 'stream-fork', to: 'route-stream', type: 'decision' },
+      { from: 'route-ns', to: 'plugins-before-ns' },
+      { from: 'plugins-before-ns', to: 'mcp-inject' },
+      { from: 'mcp-inject', to: 'strategy-execute' },
+      { from: 'strategy-execute', to: 'provider-complete' },
+      { from: 'provider-complete', to: 'mcp-loop' },
+      { from: 'mcp-loop', to: 'json-response' },
+      { from: 'route-stream', to: 'mcp-redirect' },
+      { from: 'mcp-redirect', to: 'route-ns', type: 'decision' },
+      { from: 'mcp-redirect', to: 'resolve-stream-provider', type: 'decision' },
+      { from: 'resolve-stream-provider', to: 'provider-complete-stream' },
+      { from: 'provider-complete-stream', to: 'streamwrap-meter' },
+      { from: 'streamwrap-meter', to: 'sse-write' },
+      { from: 'provider-complete', to: 'openai-complete' },
+      { from: 'provider-complete', to: 'anthropic-native', type: 'issue' },
+      { from: 'provider-complete', to: 'gemini-native', type: 'issue' },
+      { from: 'provider-complete', to: 'bedrock-native', type: 'issue' },
+      { from: 'provider-complete', to: 'cohere-native', type: 'issue' },
+      { from: 'provider-complete', to: 'slim-oai-compat', type: 'issue' },
+      { from: 'provider-complete', to: 'ollama-cloud' },
+      { from: 'provider-complete-stream', to: 'openai-stream', type: 'issue' },
+      { from: 'provider-complete-stream', to: 'slim-oai-compat', type: 'issue' },
+      { from: 'openai-stream', to: 'build-messages', type: 'issue' },
+      { from: 'core-request', to: 'core-message-json', type: 'dep' },
+      { from: 'slim-oai-compat', to: 'core-message-json', type: 'dep' },
+      { from: 'mcp-loop', to: 'issue-checkpoint', type: 'issue' },
+      { from: 'anthropic-native', to: 'issue-checkpoint', type: 'issue' },
+      { from: 'openai-stream', to: 'issue-checkpoint', type: 'issue' },
+    ];
+
+    const DEFAULT_POSITIONS = {};
+    document.querySelectorAll('.draggable').forEach(el => {
+      DEFAULT_POSITIONS[el.id] = { x: +el.dataset.x, y: +el.dataset.y };
+    });
+
+    function pickSides(fromRect, toRect) {
+      const dx = (toRect.x + toRect.w / 2) - (fromRect.x + fromRect.w / 2);
+      const dy = (toRect.y + toRect.h / 2) - (fromRect.y + fromRect.h / 2);
+      if (Math.abs(dx) > Math.abs(dy))
+        return dx > 0 ? { from: 'right', to: 'left' } : { from: 'left', to: 'right' };
+      return dy > 0 ? { from: 'bottom', to: 'top' } : { from: 'top', to: 'bottom' };
+    }
+
+    function anchor(rect, side) {
+      switch (side) {
+        case 'top': return { x: rect.x + rect.w / 2, y: rect.y };
+        case 'bottom': return { x: rect.x + rect.w / 2, y: rect.y + rect.h };
+        case 'left': return { x: rect.x, y: rect.y + rect.h / 2 };
+        case 'right': return { x: rect.x + rect.w, y: rect.y + rect.h / 2 };
+      }
+    }
+
+    function bezierPath(p1, p2, fromSide, toSide) {
+      const dist = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+      const offset = Math.min(120, Math.max(40, dist * 0.35));
+      const cp1 = { ...p1 }, cp2 = { ...p2 };
+      if (fromSide === 'bottom') cp1.y += offset;
+      if (fromSide === 'top') cp1.y -= offset;
+      if (fromSide === 'right') cp1.x += offset;
+      if (fromSide === 'left') cp1.x -= offset;
+      if (toSide === 'bottom') cp2.y += offset;
+      if (toSide === 'top') cp2.y -= offset;
+      if (toSide === 'right') cp2.x += offset;
+      if (toSide === 'left') cp2.x -= offset;
+      return `M ${p1.x} ${p1.y} C ${cp1.x} ${cp1.y}, ${cp2.x} ${cp2.y}, ${p2.x} ${p2.y}`;
+    }
+
+    function redrawEdges() {
+      edgesGroup.innerHTML = '';
+      EDGES.forEach(({ from, to, type }) => {
+        const fromEl = document.getElementById(from);
+        const toEl = document.getElementById(to);
+        if (!fromEl || !toEl) return;
+        const fromRect = { x: +fromEl.dataset.x, y: +fromEl.dataset.y, w: fromEl.offsetWidth, h: fromEl.offsetHeight };
+        const toRect = { x: +toEl.dataset.x, y: +toEl.dataset.y, w: toEl.offsetWidth, h: toEl.offsetHeight };
+        const sides = pickSides(fromRect, toRect);
+        const p1 = anchor(fromRect, sides.from);
+        const p2 = anchor(toRect, sides.to);
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        path.setAttribute('d', bezierPath(p1, p2, sides.from, sides.to));
+        path.setAttribute('class', 'edge' + (type ? ' ' + type : ''));
+        edgesGroup.appendChild(path);
+      });
+    }
+
+    function applyPosition(el, x, y) {
+      el.style.left = x + 'px';
+      el.style.top = y + 'px';
+      el.dataset.x = String(x);
+      el.dataset.y = String(y);
+      redrawEdges();
+    }
+
+    function savePositions() {
+      const pos = {};
+      document.querySelectorAll('.draggable').forEach(el => {
+        pos[el.id] = { x: +el.dataset.x, y: +el.dataset.y };
+      });
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(pos));
+    }
+
+    function loadPositions() {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      const saved = raw ? JSON.parse(raw) : null;
+      document.querySelectorAll('.draggable').forEach(el => {
+        const p = (saved && saved[el.id]) || DEFAULT_POSITIONS[el.id];
+        if (p) applyPosition(el, p.x, p.y);
+      });
+    }
+
+    document.getElementById('reset-layout').addEventListener('click', () => {
+      localStorage.removeItem(STORAGE_KEY);
+      document.querySelectorAll('.draggable').forEach(el => {
+        const p = DEFAULT_POSITIONS[el.id];
+        applyPosition(el, p.x, p.y);
+      });
+    });
+
+    document.getElementById('fit-view').addEventListener('click', () => {
+      viewport.scrollTo({ top: 0, left: 0, behavior: 'smooth' });
+    });
+
+    let dragEl = null, dragOffX = 0, dragOffY = 0;
+    document.querySelectorAll('.drag-handle, .fork-label').forEach(handle => {
+      handle.addEventListener('pointerdown', e => {
+        dragEl = handle.closest('.draggable');
+        if (!dragEl) return;
+        dragEl.setPointerCapture(e.pointerId);
+        dragOffX = e.clientX - (+dragEl.dataset.x - viewport.scrollLeft);
+        dragOffY = e.clientY - (+dragEl.dataset.y - viewport.scrollTop);
+        e.preventDefault();
+      });
+    });
+
+    document.addEventListener('pointermove', e => {
+      if (!dragEl) return;
+      const x = e.clientX - dragOffX + viewport.scrollLeft;
+      const y = e.clientY - dragOffY + viewport.scrollTop;
+      applyPosition(dragEl, Math.max(0, x), Math.max(0, y));
+    });
+
+    document.addEventListener('pointerup', () => {
+      if (dragEl) { savePositions(); dragEl = null; }
+    });
+
+    let panStart = null;
+    viewport.addEventListener('pointerdown', e => {
+      if (e.target.closest('.draggable')) return;
+      panStart = { x: e.clientX, y: e.clientY, sl: viewport.scrollLeft, st: viewport.scrollTop };
+      viewport.classList.add('panning');
+      viewport.setPointerCapture(e.pointerId);
+    });
+    viewport.addEventListener('pointermove', e => {
+      if (!panStart) return;
+      viewport.scrollLeft = panStart.sl - (e.clientX - panStart.x);
+      viewport.scrollTop = panStart.st - (e.clientY - panStart.y);
+    });
+    viewport.addEventListener('pointerup', () => {
+      panStart = null;
+      viewport.classList.remove('panning');
+    });
+
+    window.addEventListener('resize', redrawEdges);
+    loadPositions();
+    requestAnimationFrame(redrawEdges);
+  </script>
+</body>
+</html>
