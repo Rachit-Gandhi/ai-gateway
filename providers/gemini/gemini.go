@@ -98,7 +98,7 @@ type geminiPart struct {
 }
 
 type geminiContent struct {
-	Role  string       `json:"role"`
+	Role  string       `json:"role,omitempty"`
 	Parts []geminiPart `json:"parts"`
 }
 
@@ -123,8 +123,9 @@ var geminiSupportedParams = []string{
 }
 
 type geminiRequest struct {
-	Contents         []geminiContent         `json:"contents"`
-	GenerationConfig *geminiGenerationConfig `json:"generationConfig,omitempty"`
+	Contents          []geminiContent         `json:"contents"`
+	SystemInstruction *geminiContent          `json:"systemInstruction,omitempty"`
+	GenerationConfig  *geminiGenerationConfig `json:"generationConfig,omitempty"`
 }
 
 type geminiResponse struct {
@@ -190,12 +191,12 @@ type geminiStreamResponse struct {
 	} `json:"usageMetadata"`
 }
 
-// convertToGemini converts gateway Messages to Gemini contents format.
-// System messages are prepended to the first user message.
-func convertToGemini(messages []core.Message) []geminiContent {
-	var systemText string
-	var contents []geminiContent
-
+// convertToGemini converts gateway Messages to Gemini contents format. System
+// messages are collected separately and returned as systemText so the caller can
+// route them through Gemini's dedicated systemInstruction field (Gemini 1.5+)
+// rather than smuggling them into a user turn. Multiple system messages are
+// joined with newlines and preserved regardless of turn order (#144).
+func convertToGemini(messages []core.Message) (contents []geminiContent, systemText string) {
 	for _, msg := range messages {
 		if msg.Role == core.RoleSystem {
 			if systemText != "" {
@@ -210,19 +211,13 @@ func convertToGemini(messages []core.Message) []geminiContent {
 			role = "model"
 		}
 
-		content := msg.Content
-		if role == "user" && systemText != "" {
-			content = systemText + "\n" + content
-			systemText = ""
-		}
-
 		contents = append(contents, geminiContent{
 			Role:  role,
-			Parts: []geminiPart{{Text: content}},
+			Parts: []geminiPart{{Text: msg.Content}},
 		})
 	}
 
-	return contents
+	return contents, systemText
 }
 
 // mapFinishReason maps Gemini finish reasons to OpenAI-style reasons.
@@ -240,8 +235,14 @@ func mapFinishReason(reason string) string {
 }
 
 func buildRequest(req core.Request) (geminiRequest, error) {
+	contents, systemText := convertToGemini(req.Messages)
 	r := geminiRequest{
-		Contents: convertToGemini(req.Messages),
+		Contents: contents,
+	}
+	if systemText != "" {
+		r.SystemInstruction = &geminiContent{
+			Parts: []geminiPart{{Text: systemText}},
+		}
 	}
 	cfg := geminiGenerationConfig{
 		Temperature:      req.Temperature,
@@ -268,7 +269,7 @@ func buildRequest(req core.Request) (geminiRequest, error) {
 	return r, nil
 }
 
-func embeddingInputs(input interface{}) ([]string, error) {
+func embeddingInputs(input any) ([]string, error) {
 	switch v := input.(type) {
 	case string:
 		return []string{v}, nil
@@ -277,7 +278,7 @@ func embeddingInputs(input interface{}) ([]string, error) {
 			return nil, fmt.Errorf("embed: Input must not be an empty array")
 		}
 		return v, nil
-	case []interface{}:
+	case []any:
 		if len(v) == 0 {
 			return nil, fmt.Errorf("embed: Input must not be an empty array")
 		}
