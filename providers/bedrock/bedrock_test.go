@@ -226,6 +226,55 @@ func TestBedrockProvider_Embed_CohereV4MapsTypedFloatResponse(t *testing.T) {
 	}
 }
 
+func TestBedrockProvider_CompleteAnthropic_ForwardsToolsAndDecodesToolUse(t *testing.T) {
+	fake := &fakeBedrockRuntimeClient{
+		responses: [][]byte{
+			[]byte(`{
+				"id":"msg_1",
+				"type":"message",
+				"role":"assistant",
+				"content":[{"type":"tool_use","id":"toolu_1","name":"lookup","input":{"city":"SF"}}],
+				"stop_reason":"tool_use",
+				"usage":{"input_tokens":1,"output_tokens":1}
+			}`),
+		},
+	}
+	p := &Provider{name: Name, client: fake}
+
+	resp, err := p.Complete(context.Background(), core.Request{
+		Model:    "anthropic.claude-3-5-sonnet-20241022-v2:0",
+		Messages: []core.Message{{Role: core.RoleUser, Content: "weather?"}},
+		Tools: []core.Tool{{
+			Type: "function",
+			Function: core.Function{
+				Name:        "lookup",
+				Description: "Lookup weather",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}}}`),
+			},
+		}},
+		ToolChoice: "required",
+	})
+	if err != nil {
+		t.Fatalf("Complete() error: %v", err)
+	}
+	var body bedrockAnthropicRequest
+	mustUnmarshalBody(t, fake.invokeCalls[0].Body, &body)
+	if len(body.Tools) != 1 || body.Tools[0].Name != "lookup" {
+		t.Fatalf("tools = %#v, want lookup", body.Tools)
+	}
+	choice, ok := body.ToolChoice.(map[string]interface{})
+	if !ok || choice["type"] != "any" {
+		t.Fatalf("tool_choice = %#v, want type any", body.ToolChoice)
+	}
+	if len(resp.Choices) != 1 || len(resp.Choices[0].Message.ToolCalls) != 1 {
+		t.Fatalf("tool calls = %#v, want one", resp.Choices)
+	}
+	tc := resp.Choices[0].Message.ToolCalls[0]
+	if tc.ID != "toolu_1" || tc.Function.Name != "lookup" || tc.Function.Arguments != `{"city":"SF"}` {
+		t.Fatalf("tool call = %#v, want lookup", tc)
+	}
+}
+
 func TestBedrockProvider_Embed_Validation(t *testing.T) {
 	cases := []struct {
 		name string

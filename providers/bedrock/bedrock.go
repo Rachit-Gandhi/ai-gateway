@@ -161,13 +161,36 @@ func (p *Provider) Models() []core.ModelInfo {
 // ── Anthropic Claude on Bedrock ───────────────────────────────────────────────
 
 type bedrockAnthropicRequest struct {
-	AnthropicVersion string         `json:"anthropic_version"`
-	MaxTokens        int            `json:"max_tokens"`
-	Messages         []core.Message `json:"messages"`
-	Temperature      *float64       `json:"temperature,omitempty"`
-	TopP             *float64       `json:"top_p,omitempty"`
-	StopSequences    []string       `json:"stop_sequences,omitempty"`
-	System           string         `json:"system,omitempty"`
+	AnthropicVersion string                    `json:"anthropic_version"`
+	MaxTokens        int                       `json:"max_tokens"`
+	Messages         []bedrockAnthropicMessage `json:"messages"`
+	Tools            []bedrockAnthropicTool    `json:"tools,omitempty"`
+	ToolChoice       interface{}               `json:"tool_choice,omitempty"`
+	Temperature      *float64                  `json:"temperature,omitempty"`
+	TopP             *float64                  `json:"top_p,omitempty"`
+	StopSequences    []string                  `json:"stop_sequences,omitempty"`
+	System           string                    `json:"system,omitempty"`
+}
+
+type bedrockAnthropicMessage struct {
+	Role    string      `json:"role"`
+	Content interface{} `json:"content"`
+}
+
+type bedrockAnthropicBlock struct {
+	Type      string          `json:"type"`
+	Text      string          `json:"text,omitempty"`
+	ID        string          `json:"id,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Input     json.RawMessage `json:"input,omitempty"`
+	ToolUseID string          `json:"tool_use_id,omitempty"`
+	Content   string          `json:"content,omitempty"`
+}
+
+type bedrockAnthropicTool struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	InputSchema json.RawMessage `json:"input_schema,omitempty"`
 }
 
 type bedrockAnthropicResponse struct {
@@ -175,8 +198,11 @@ type bedrockAnthropicResponse struct {
 	Type    string `json:"type"`
 	Role    string `json:"role"`
 	Content []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
+		Type  string          `json:"type"`
+		Text  string          `json:"text"`
+		ID    string          `json:"id"`
+		Name  string          `json:"name"`
+		Input json.RawMessage `json:"input"`
 	} `json:"content"`
 	StopReason string `json:"stop_reason"`
 	Usage      struct {
@@ -447,13 +473,107 @@ func isBedrockCohereEmbeddingModel(model string) bool {
 func bedrockSupportedParams(modelID string) []string {
 	switch {
 	case strings.HasPrefix(modelID, "anthropic."):
-		return []string{"temperature", "top_p", "max_tokens", "stop"}
+		return []string{"temperature", "top_p", "max_tokens", "stop", "tools", "tool_choice"}
 	case strings.HasPrefix(modelID, "amazon.titan"):
 		return []string{"temperature", "top_p", "max_tokens", "stop"}
 	case strings.HasPrefix(modelID, "meta.llama"):
 		return []string{"temperature", "top_p", "max_tokens"}
 	default:
 		return nil
+	}
+}
+
+func bedrockBuildAnthropicMessages(req core.Request) ([]bedrockAnthropicMessage, string) {
+	var systemParts []string
+	var messages []bedrockAnthropicMessage
+	for _, msg := range req.Messages {
+		switch msg.Role {
+		case core.RoleSystem:
+			systemParts = append(systemParts, msg.Content)
+		case core.RoleTool:
+			block := bedrockAnthropicBlock{
+				Type:      "tool_result",
+				ToolUseID: msg.ToolCallID,
+				Content:   msg.Content,
+			}
+			messages = append(messages, bedrockAnthropicMessage{Role: core.RoleUser, Content: []bedrockAnthropicBlock{block}})
+		default:
+			messages = append(messages, bedrockAnthropicMessage{Role: msg.Role, Content: bedrockAnthropicContent(msg)})
+		}
+	}
+	return messages, strings.Join(systemParts, "\n")
+}
+
+func bedrockAnthropicContent(msg core.Message) interface{} {
+	var blocks []bedrockAnthropicBlock
+	if msg.Content != "" {
+		blocks = append(blocks, bedrockAnthropicBlock{Type: "text", Text: msg.Content})
+	}
+	for _, tc := range msg.ToolCalls {
+		input := json.RawMessage(tc.Function.Arguments)
+		if len(input) == 0 || !json.Valid(input) {
+			input = json.RawMessage(`{}`)
+		}
+		blocks = append(blocks, bedrockAnthropicBlock{
+			Type:  "tool_use",
+			ID:    tc.ID,
+			Name:  tc.Function.Name,
+			Input: input,
+		})
+	}
+	if len(msg.ToolCalls) == 0 {
+		return msg.Content
+	}
+	return blocks
+}
+
+func bedrockAnthropicTools(tools []core.Tool) []bedrockAnthropicTool {
+	if len(tools) == 0 {
+		return nil
+	}
+	out := make([]bedrockAnthropicTool, 0, len(tools))
+	for _, t := range tools {
+		schema := t.Function.Parameters
+		if len(schema) == 0 {
+			schema = json.RawMessage(`{"type":"object","properties":{}}`)
+		}
+		out = append(out, bedrockAnthropicTool{
+			Name:        t.Function.Name,
+			Description: t.Function.Description,
+			InputSchema: schema,
+		})
+	}
+	return out
+}
+
+func bedrockAnthropicToolChoice(choice interface{}) interface{} {
+	switch v := choice.(type) {
+	case nil:
+		return nil
+	case string:
+		switch v {
+		case "auto", "none":
+			return map[string]string{"type": v}
+		case "required":
+			return map[string]string{"type": "any"}
+		default:
+			return nil
+		}
+	default:
+		raw, err := json.Marshal(v)
+		if err != nil {
+			return nil
+		}
+		var named struct {
+			Type     string `json:"type"`
+			Function struct {
+				Name string `json:"name"`
+			} `json:"function"`
+		}
+		if err := json.Unmarshal(raw, &named); err == nil && named.Type == "function" && named.Function.Name != "" {
+			return map[string]string{"type": "tool", "name": named.Function.Name}
+		}
+		return v
 	}
 }
 
@@ -480,20 +600,14 @@ func (p *Provider) completeAnthropic(ctx context.Context, req core.Request) (*co
 		maxTokens = *req.MaxTokens
 	}
 
-	var system string
-	var messages []core.Message
-	for _, msg := range req.Messages {
-		if msg.Role == core.RoleSystem {
-			system = msg.Content
-		} else {
-			messages = append(messages, msg)
-		}
-	}
+	messages, system := bedrockBuildAnthropicMessages(req)
 
 	anthropicReq := bedrockAnthropicRequest{
 		AnthropicVersion: "bedrock-2023-05-31",
 		MaxTokens:        maxTokens,
 		Messages:         messages,
+		Tools:            bedrockAnthropicTools(req.Tools),
+		ToolChoice:       bedrockAnthropicToolChoice(req.ToolChoice),
 		Temperature:      req.Temperature,
 		TopP:             req.TopP,
 		StopSequences:    req.Stop,
@@ -520,9 +634,25 @@ func (p *Provider) completeAnthropic(ctx context.Context, req core.Request) (*co
 	}
 
 	text := ""
+	var toolCalls []core.ToolCall
 	for _, c := range anthropicResp.Content {
 		if c.Type == "text" {
 			text += c.Text
+			continue
+		}
+		if c.Type == "tool_use" {
+			args := string(c.Input)
+			if args == "" {
+				args = "{}"
+			}
+			toolCalls = append(toolCalls, core.ToolCall{
+				ID:   c.ID,
+				Type: "function",
+				Function: core.FunctionCall{
+					Name:      c.Name,
+					Arguments: args,
+				},
+			})
 		}
 	}
 
@@ -532,7 +662,7 @@ func (p *Provider) completeAnthropic(ctx context.Context, req core.Request) (*co
 		Provider: p.name,
 		Choices: []core.Choice{{
 			Index:        0,
-			Message:      core.Message{Role: core.RoleAssistant, Content: text},
+			Message:      core.Message{Role: core.RoleAssistant, Content: text, ToolCalls: toolCalls},
 			FinishReason: core.NormalizeFinishReason(anthropicResp.StopReason),
 		}},
 		Usage: core.Usage{
@@ -669,20 +799,14 @@ func (p *Provider) CompleteStream(ctx context.Context, req core.Request) (<-chan
 		maxTokens = *req.MaxTokens
 	}
 
-	var system string
-	var messages []core.Message
-	for _, msg := range req.Messages {
-		if msg.Role == core.RoleSystem {
-			system = msg.Content
-		} else {
-			messages = append(messages, msg)
-		}
-	}
+	messages, system := bedrockBuildAnthropicMessages(req)
 
 	anthropicReq := bedrockAnthropicRequest{
 		AnthropicVersion: "bedrock-2023-05-31",
 		MaxTokens:        maxTokens,
 		Messages:         messages,
+		Tools:            bedrockAnthropicTools(req.Tools),
+		ToolChoice:       bedrockAnthropicToolChoice(req.ToolChoice),
 		Temperature:      req.Temperature,
 		TopP:             req.TopP,
 		StopSequences:    req.Stop,

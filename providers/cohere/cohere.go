@@ -94,6 +94,8 @@ func (p *Provider) Models() []core.ModelInfo {
 type cohereRequest struct {
 	Model            string         `json:"model"`
 	Messages         []core.Message `json:"messages"`
+	Tools            []core.Tool    `json:"tools,omitempty"`
+	ToolChoice       string         `json:"tool_choice,omitempty"`
 	Temperature      *float64       `json:"temperature,omitempty"`
 	MaxTokens        *int           `json:"max_tokens,omitempty"`
 	P                *float64       `json:"p,omitempty"`
@@ -109,7 +111,7 @@ type cohereRequest struct {
 // tool calling is tracked separately in #139.
 var cohereSupportedParams = []string{
 	"temperature", "top_p", "max_tokens", "stop",
-	"seed", "presence_penalty", "frequency_penalty",
+	"seed", "presence_penalty", "frequency_penalty", "tools", "tool_choice",
 }
 
 type cohereContentBlock struct {
@@ -118,8 +120,9 @@ type cohereContentBlock struct {
 }
 
 type cohereMessage struct {
-	Role    string               `json:"role"`
-	Content []cohereContentBlock `json:"content"`
+	Role      string               `json:"role"`
+	Content   []cohereContentBlock `json:"content"`
+	ToolCalls []core.ToolCall      `json:"tool_calls,omitempty"`
 }
 
 type cohereBilledUnits struct {
@@ -148,6 +151,24 @@ type cohereErrorResponse struct {
 	Message string `json:"message"`
 }
 
+func cohereToolChoice(choice interface{}) string {
+	switch v := choice.(type) {
+	case nil:
+		return ""
+	case string:
+		switch v {
+		case "required":
+			return "REQUIRED"
+		case "none":
+			return "NONE"
+		default:
+			return ""
+		}
+	default:
+		return "REQUIRED"
+	}
+}
+
 // Complete sends a chat completion request to Cohere.
 func (p *Provider) Complete(ctx context.Context, req core.Request) (*core.Response, error) {
 	core.WarnUnsupportedParams(ctx, p.Name(), req.Model, req, cohereSupportedParams...)
@@ -155,6 +176,8 @@ func (p *Provider) Complete(ctx context.Context, req core.Request) (*core.Respon
 	cohReq := cohereRequest{
 		Model:            req.Model,
 		Messages:         req.Messages,
+		Tools:            req.Tools,
+		ToolChoice:       cohereToolChoice(req.ToolChoice),
 		Temperature:      req.Temperature,
 		MaxTokens:        req.MaxTokens,
 		P:                req.TopP,
@@ -216,8 +239,9 @@ func (p *Provider) Complete(ctx context.Context, req core.Request) (*core.Respon
 			{
 				Index: 0,
 				Message: core.Message{
-					Role:    cohResp.Message.Role,
-					Content: strings.Join(contentParts, ""),
+					Role:      cohResp.Message.Role,
+					Content:   strings.Join(contentParts, ""),
+					ToolCalls: cohResp.Message.ToolCalls,
 				},
 				FinishReason: core.NormalizeFinishReason(cohResp.FinishReason),
 			},
@@ -255,6 +279,8 @@ func (p *Provider) CompleteStream(ctx context.Context, req core.Request) (<-chan
 	cohReq := cohereRequest{
 		Model:            req.Model,
 		Messages:         req.Messages,
+		Tools:            req.Tools,
+		ToolChoice:       cohereToolChoice(req.ToolChoice),
 		Temperature:      req.Temperature,
 		MaxTokens:        req.MaxTokens,
 		P:                req.TopP,

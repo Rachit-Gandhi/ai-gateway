@@ -117,6 +117,61 @@ func TestCohereProvider_CompleteStream_MockSSE(t *testing.T) {
 	}
 }
 
+func TestCohereProvider_Complete_ForwardsToolsAndDecodesToolCalls(t *testing.T) {
+	var captured cohereRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"id":"chat-1",
+			"finish_reason":"TOOL_CALL",
+			"message":{
+				"role":"assistant",
+				"content":[],
+				"tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"city\":\"SF\"}"}}]
+			},
+			"usage":{"tokens":{"input_tokens":1,"output_tokens":1}}
+		}`)
+	}))
+	defer srv.Close()
+
+	p, _ := New("test-key", srv.URL)
+	resp, err := p.Complete(context.Background(), core.Request{
+		Model:    "command-r-plus",
+		Messages: []core.Message{{Role: core.RoleUser, Content: "weather?"}},
+		Tools: []core.Tool{{
+			Type: "function",
+			Function: core.Function{
+				Name:        "lookup",
+				Description: "Lookup weather",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}}}`),
+			},
+		}},
+		ToolChoice: "required",
+	})
+	if err != nil {
+		t.Fatalf("Complete() error: %v", err)
+	}
+	if len(captured.Tools) != 1 || captured.Tools[0].Function.Name != "lookup" {
+		t.Fatalf("tools = %#v, want lookup", captured.Tools)
+	}
+	if captured.ToolChoice != "REQUIRED" {
+		t.Fatalf("tool_choice = %q, want REQUIRED", captured.ToolChoice)
+	}
+	if len(resp.Choices) != 1 || len(resp.Choices[0].Message.ToolCalls) != 1 {
+		t.Fatalf("tool calls = %#v, want one", resp.Choices)
+	}
+	tc := resp.Choices[0].Message.ToolCalls[0]
+	if tc.ID != "call_1" || tc.Function.Name != "lookup" || tc.Function.Arguments != `{"city":"SF"}` {
+		t.Fatalf("tool call = %#v, want lookup", tc)
+	}
+	if resp.Choices[0].FinishReason != core.FinishReasonToolCalls {
+		t.Fatalf("finish reason = %q, want tool_calls", resp.Choices[0].FinishReason)
+	}
+}
+
 func TestCohereProvider_Embed_StringInput_MockHTTP(t *testing.T) {
 	const apiKey = "test-key"
 	seenRequest := false
