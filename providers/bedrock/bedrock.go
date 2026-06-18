@@ -870,7 +870,7 @@ func (p *Provider) CompleteStream(ctx context.Context, req core.Request) (<-chan
 					ch <- core.StreamChunk{
 						Model: req.Model,
 						Choices: []core.StreamChoice{{
-							Index: toolCallIndex,
+							Index: 0,
 							Delta: core.MessageDelta{
 								ToolCalls: []core.ToolCall{{
 									Index: bedrockStreamIndexPtr(toolCallIndex),
@@ -903,7 +903,7 @@ func (p *Provider) CompleteStream(ctx context.Context, req core.Request) (<-chan
 						ch <- core.StreamChunk{
 							Model: req.Model,
 							Choices: []core.StreamChoice{{
-								Index: toolCallIndex,
+								Index: 0,
 								Delta: core.MessageDelta{
 									ToolCalls: []core.ToolCall{{
 										Index: bedrockStreamIndexPtr(toolCallIndex),

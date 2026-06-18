@@ -128,6 +128,12 @@ data: {"type":"tool-call-delta","index":0,"delta":{"message":{"tool_calls":{"fun
 
 data: {"type":"tool-call-end","index":0}
 
+data: {"type":"tool-call-start","index":1,"delta":{"message":{"tool_calls":[{"id":"call_2","type":"function","function":{"name":"lookup_time","arguments":""}}]}}}
+
+data: {"type":"tool-call-delta","index":1,"delta":{"message":{"tool_calls":{"function":{"arguments":"{\"city\""}}}}}
+
+data: {"type":"tool-call-end","index":1}
+
 data: {"type":"message-end","delta":{"finish_reason":"TOOL_CALL","usage":{"tokens":{"input_tokens":5,"output_tokens":2}}}}
 
 `
@@ -160,21 +166,44 @@ data: {"type":"message-end","delta":{"finish_reason":"TOOL_CALL","usage":{"token
 		chunks = append(chunks, c)
 	}
 
-	if len(chunks) != 4 {
-		t.Fatalf("chunks len = %d, want 4: %#v", len(chunks), chunks)
+	if len(chunks) != 6 {
+		t.Fatalf("chunks len = %d, want 6: %#v", len(chunks), chunks)
 	}
 	start := chunks[0].Choices[0].Delta.ToolCalls[0]
+	if chunks[0].Choices[0].Index != 0 {
+		t.Fatalf("choice index = %d, want sole completion index 0", chunks[0].Choices[0].Index)
+	}
 	if start.Index == nil || *start.Index != 0 || start.ID != "call_1" || start.Function.Name != "lookup" {
 		t.Fatalf("start tool call = %#v, want lookup call at index 0", start)
+	}
+	if chunks[1].Choices[0].Index != 0 {
+		t.Fatalf("args choice index = %d, want sole completion index 0", chunks[1].Choices[0].Index)
 	}
 	if chunks[1].Choices[0].Delta.ToolCalls[0].Function.Arguments != `{"city"` {
 		t.Fatalf("first args delta = %#v", chunks[1].Choices[0].Delta.ToolCalls)
 	}
+	if chunks[2].Choices[0].Index != 0 {
+		t.Fatalf("second args choice index = %d, want sole completion index 0", chunks[2].Choices[0].Index)
+	}
 	if chunks[2].Choices[0].Delta.ToolCalls[0].Function.Arguments != `:"SF"}` {
 		t.Fatalf("second args delta = %#v", chunks[2].Choices[0].Delta.ToolCalls)
 	}
-	if chunks[3].Choices[0].FinishReason != core.FinishReasonToolCalls {
-		t.Fatalf("finish_reason = %q, want %q", chunks[3].Choices[0].FinishReason, core.FinishReasonToolCalls)
+	secondStart := chunks[3].Choices[0].Delta.ToolCalls[0]
+	if chunks[3].Choices[0].Index != 0 {
+		t.Fatalf("second tool choice index = %d, want sole completion index 0", chunks[3].Choices[0].Index)
+	}
+	if secondStart.Index == nil || *secondStart.Index != 1 || secondStart.ID != "call_2" || secondStart.Function.Name != "lookup_time" {
+		t.Fatalf("second start tool call = %#v, want lookup_time call at index 1", secondStart)
+	}
+	secondArgs := chunks[4].Choices[0].Delta.ToolCalls[0]
+	if chunks[4].Choices[0].Index != 0 {
+		t.Fatalf("second tool args choice index = %d, want sole completion index 0", chunks[4].Choices[0].Index)
+	}
+	if secondArgs.Index == nil || *secondArgs.Index != 1 || secondArgs.Function.Arguments != `{"city"` {
+		t.Fatalf("second tool args delta = %#v, want index 1 city fragment", secondArgs)
+	}
+	if chunks[5].Choices[0].FinishReason != core.FinishReasonToolCalls {
+		t.Fatalf("finish_reason = %q, want %q", chunks[5].Choices[0].FinishReason, core.FinishReasonToolCalls)
 	}
 }
 

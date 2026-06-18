@@ -428,7 +428,7 @@ func (p *Provider) CompleteStream(ctx context.Context, req core.Request) (<-chan
 					ID: event.ID,
 					Choices: []core.StreamChoice{
 						{
-							Index: event.Index,
+							Index: 0,
 							Delta: core.MessageDelta{
 								ToolCalls: []core.ToolCall{tc},
 							},
@@ -448,7 +448,7 @@ func (p *Provider) CompleteStream(ctx context.Context, req core.Request) (<-chan
 					ID: event.ID,
 					Choices: []core.StreamChoice{
 						{
-							Index: event.Index,
+							Index: 0,
 							Delta: core.MessageDelta{
 								ToolCalls: []core.ToolCall{tc},
 							},
