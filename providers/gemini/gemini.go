@@ -266,9 +266,12 @@ func convertToGemini(messages []core.Message) (contents []geminiContent, systemT
 
 func geminiParts(msg core.Message, toolCallNames map[string]string) []geminiPart {
 	if msg.Role == core.RoleTool {
-		response := json.RawMessage(msg.Content)
+		trimmedContent := strings.TrimSpace(msg.Content)
+		response := json.RawMessage(trimmedContent)
 		if len(response) == 0 || !json.Valid(response) {
 			response, _ = json.Marshal(map[string]string{"result": msg.Content})
+		} else if !strings.HasPrefix(trimmedContent, "{") {
+			response, _ = json.Marshal(map[string]json.RawMessage{"result": response})
 		}
 		return []geminiPart{{FunctionResponse: &geminiFunctionResponse{
 			ID:       msg.ToolCallID,

@@ -404,3 +404,58 @@ func TestGeminiProvider_Complete_ForwardsToolResultWithFunctionName(t *testing.T
 		t.Fatalf("function response = %#v, want lookup call_1", got)
 	}
 }
+
+func TestGeminiProvider_Complete_WrapsNonObjectToolResult(t *testing.T) {
+	var captured struct {
+		Contents []struct {
+			Role  string `json:"role"`
+			Parts []struct {
+				FunctionResponse *struct {
+					ID       string          `json:"id"`
+					Name     string          `json:"name"`
+					Response json.RawMessage `json:"response"`
+				} `json:"functionResponse"`
+			} `json:"parts"`
+		} `json:"contents"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"done"}]}}]}`))
+	}))
+	defer srv.Close()
+
+	p, _ := New("test-key", srv.URL)
+	_, err := p.Complete(context.Background(), core.Request{
+		Model: "gemini-2.0-flash",
+		Messages: []core.Message{
+			{Role: core.RoleUser, Content: "status?"},
+			{Role: core.RoleAssistant, ToolCalls: []core.ToolCall{{
+				ID:   "call_1",
+				Type: "function",
+				Function: core.FunctionCall{
+					Name:      "lookup",
+					Arguments: `{}`,
+				},
+			}}},
+			{Role: core.RoleTool, ToolCallID: "call_1", Content: `"ok"`},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Complete() error: %v", err)
+	}
+
+	if len(captured.Contents) != 3 {
+		t.Fatalf("contents len = %d, want 3", len(captured.Contents))
+	}
+	toolResult := captured.Contents[2]
+	if toolResult.Role != core.RoleUser || len(toolResult.Parts) != 1 || toolResult.Parts[0].FunctionResponse == nil {
+		t.Fatalf("tool result content = %#v, want user functionResponse", toolResult)
+	}
+	got := toolResult.Parts[0].FunctionResponse
+	if got.ID != "call_1" || got.Name != "lookup" || string(got.Response) != `{"result":"ok"}` {
+		t.Fatalf("function response = %#v, want wrapped lookup call_1", got)
+	}
+}
