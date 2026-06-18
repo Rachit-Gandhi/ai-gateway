@@ -94,8 +94,40 @@ func (p *Provider) Models() []core.ModelInfo {
 }
 
 type anthropicMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role string `json:"role"`
+	// Content is either a plain string (text-only turns) or a []anthropicReqBlock
+	// (multimodal turns, tool_use on assistant turns, tool_result on user turns).
+	Content any `json:"content"`
+}
+
+// anthropicReqBlock is a single content block in an outbound message. Only the
+// fields relevant to Type are populated; omitempty keeps each block minimal.
+type anthropicReqBlock struct {
+	Type string `json:"type"`
+
+	// type=text
+	Text string `json:"text,omitempty"`
+
+	// type=image
+	Source *anthropicImageSource `json:"source,omitempty"`
+
+	// type=tool_use
+	ID    string          `json:"id,omitempty"`
+	Name  string          `json:"name,omitempty"`
+	Input json.RawMessage `json:"input,omitempty"`
+
+	// type=tool_result
+	ToolUseID string `json:"tool_use_id,omitempty"`
+	Content   string `json:"content,omitempty"`
+}
+
+// anthropicImageSource carries an image for an "image" content block. Anthropic
+// accepts either inlined base64 data or a remote URL.
+type anthropicImageSource struct {
+	Type      string `json:"type"`                 // "base64" | "url"
+	MediaType string `json:"media_type,omitempty"` // base64 only
+	Data      string `json:"data,omitempty"`       // base64 only
+	URL       string `json:"url,omitempty"`        // url only
 }
 
 type anthropicRequest struct {
@@ -149,17 +181,121 @@ type anthropicErrorResponse struct {
 func buildMessages(req core.Request) ([]anthropicMessage, string) {
 	var systemParts []string
 	var messages []anthropicMessage
+
 	for _, msg := range req.Messages {
-		if msg.Role == "system" {
+		switch msg.Role {
+		case core.RoleSystem:
 			systemParts = append(systemParts, msg.Content)
-		} else {
+
+		case core.RoleTool:
+			// Anthropic requires tool results as tool_result blocks inside a
+			// user turn. Merge consecutive results into the preceding user turn
+			// so parallel tool calls land in a single message.
+			block := anthropicReqBlock{
+				Type:      "tool_result",
+				ToolUseID: msg.ToolCallID,
+				Content:   msg.Content,
+			}
+			if n := len(messages); n > 0 && messages[n-1].Role == core.RoleUser {
+				if blocks, ok := messages[n-1].Content.([]anthropicReqBlock); ok {
+					blocks = append(blocks, block)
+					messages[n-1].Content = blocks
+					continue
+				}
+			}
+			messages = append(messages, anthropicMessage{
+				Role:    core.RoleUser,
+				Content: []anthropicReqBlock{block},
+			})
+
+		default:
 			messages = append(messages, anthropicMessage{
 				Role:    msg.Role,
-				Content: msg.Content,
+				Content: buildContent(msg),
 			})
 		}
 	}
 	return messages, strings.Join(systemParts, "\n")
+}
+
+// buildContent renders a non-system message's content for the Anthropic API.
+// Plain text turns stay a JSON string (the common path); multimodal turns and
+// assistant tool calls become an array of content blocks.
+func buildContent(msg core.Message) any {
+	var blocks []anthropicReqBlock
+
+	if len(msg.ContentParts) > 0 {
+		for _, part := range msg.ContentParts {
+			switch part.Type {
+			case core.ContentTypeText:
+				blocks = append(blocks, anthropicReqBlock{Type: "text", Text: part.Text})
+			case "image_url":
+				if part.ImageURL != nil {
+					blocks = append(blocks, imageBlock(part.ImageURL.URL))
+				}
+			}
+		}
+	} else if msg.Content != "" {
+		blocks = append(blocks, anthropicReqBlock{Type: "text", Text: msg.Content})
+	}
+
+	for _, tc := range msg.ToolCalls {
+		input := json.RawMessage(tc.Function.Arguments)
+		if len(input) == 0 {
+			input = json.RawMessage("{}")
+		}
+		blocks = append(blocks, anthropicReqBlock{
+			Type:  "tool_use",
+			ID:    tc.ID,
+			Name:  tc.Function.Name,
+			Input: input,
+		})
+	}
+
+	// Plain single-text turn: keep the lightweight string form so the common
+	// path is byte-for-byte unchanged.
+	if len(msg.ContentParts) == 0 && len(msg.ToolCalls) == 0 {
+		return msg.Content
+	}
+	return blocks
+}
+
+// imageBlock maps an OpenAI image_url (data URI or remote URL) to an Anthropic
+// image content block.
+func imageBlock(url string) anthropicReqBlock {
+	if mediaType, data, ok := parseDataURI(url); ok {
+		return anthropicReqBlock{
+			Type: "image",
+			Source: &anthropicImageSource{
+				Type:      "base64",
+				MediaType: mediaType,
+				Data:      data,
+			},
+		}
+	}
+	return anthropicReqBlock{
+		Type:   "image",
+		Source: &anthropicImageSource{Type: "url", URL: url},
+	}
+}
+
+// parseDataURI splits a data URI of the form "data:<media-type>;base64,<data>"
+// into its media type and payload. ok is false for any non-base64 data URI or
+// a plain remote URL.
+func parseDataURI(uri string) (mediaType, data string, ok bool) {
+	const prefix = "data:"
+	if !strings.HasPrefix(uri, prefix) {
+		return "", "", false
+	}
+	meta, payload, found := strings.Cut(uri[len(prefix):], ",")
+	if !found {
+		return "", "", false
+	}
+	mediaType, encoding, _ := strings.Cut(meta, ";")
+	if encoding != "base64" {
+		return "", "", false
+	}
+	return mediaType, payload, true
 }
 
 // Complete sends a chat completion request to Anthropic.
