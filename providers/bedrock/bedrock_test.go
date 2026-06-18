@@ -334,6 +334,59 @@ func TestBedrockProvider_CompleteAnthropic_ForwardsToolResultAndDecodesFinalAnsw
 	}
 }
 
+func TestBedrockProvider_CompleteAnthropic_MergesParallelToolResults(t *testing.T) {
+	fake := &fakeBedrockRuntimeClient{
+		responses: [][]byte{
+			[]byte(`{
+				"id":"msg_2",
+				"type":"message",
+				"role":"assistant",
+				"content":[{"type":"text","text":"done"}],
+				"stop_reason":"end_turn",
+				"usage":{"input_tokens":2,"output_tokens":3}
+			}`),
+		},
+	}
+	p := &Provider{name: Name, client: fake}
+
+	_, err := p.Complete(context.Background(), core.Request{
+		Model: "anthropic.claude-3-5-sonnet-20241022-v2:0",
+		Messages: []core.Message{
+			{Role: core.RoleUser, Content: "weather and time?"},
+			{Role: core.RoleAssistant, ToolCalls: []core.ToolCall{
+				{ID: "toolu_weather", Type: "function", Function: core.FunctionCall{Name: "weather", Arguments: `{"city":"SF"}`}},
+				{ID: "toolu_time", Type: "function", Function: core.FunctionCall{Name: "time", Arguments: `{"city":"SF"}`}},
+			}},
+			{Role: core.RoleTool, ToolCallID: "toolu_weather", Content: `{"temp":"72F"}`},
+			{Role: core.RoleTool, ToolCallID: "toolu_time", Content: `{"time":"10:00"}`},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Complete() error: %v", err)
+	}
+
+	var body struct {
+		Messages []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}
+	mustUnmarshalBody(t, fake.invokeCalls[0].Body, &body)
+	if len(body.Messages) != 3 {
+		t.Fatalf("messages len = %d, want 3 with merged tool results", len(body.Messages))
+	}
+	var resultBlocks []map[string]json.RawMessage
+	if err := json.Unmarshal(body.Messages[2].Content, &resultBlocks); err != nil {
+		t.Fatalf("decode tool result blocks: %v", err)
+	}
+	if body.Messages[2].Role != core.RoleUser || len(resultBlocks) != 2 {
+		t.Fatalf("tool result message = %#v blocks=%#v, want one user turn with two tool results", body.Messages[2], resultBlocks)
+	}
+	if jsonString(resultBlocks[0]["tool_use_id"]) != "toolu_weather" || jsonString(resultBlocks[1]["tool_use_id"]) != "toolu_time" {
+		t.Fatalf("tool result ids = %#v, want weather/time", resultBlocks)
+	}
+}
+
 func TestBedrockProvider_CompleteStreamAnthropic_ForwardsToolUseDeltas(t *testing.T) {
 	fake := &fakeBedrockRuntimeClient{
 		streamResponses: [][]byte{
@@ -380,6 +433,43 @@ func TestBedrockProvider_CompleteStreamAnthropic_ForwardsToolUseDeltas(t *testin
 	}
 	if chunks[3].Choices[0].FinishReason != core.FinishReasonToolCalls {
 		t.Fatalf("finish_reason = %q, want %q", chunks[3].Choices[0].FinishReason, core.FinishReasonToolCalls)
+	}
+}
+
+func TestBedrockProvider_CompleteStreamAnthropic_MapsContentBlockIndexToToolCallIndex(t *testing.T) {
+	fake := &fakeBedrockRuntimeClient{
+		streamResponses: [][]byte{
+			[]byte(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Let me check."}}`),
+			[]byte(`{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"lookup","input":{}}}`),
+			[]byte(`{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"city\""}}`),
+			[]byte(`{"type":"message_delta","delta":{"stop_reason":"tool_use"}}`),
+		},
+	}
+	p := &Provider{name: Name, client: fake}
+
+	ch, err := p.CompleteStream(context.Background(), core.Request{
+		Model:    "anthropic.claude-3-5-sonnet-20241022-v2:0",
+		Messages: []core.Message{{Role: core.RoleUser, Content: "weather?"}},
+	})
+	if err != nil {
+		t.Fatalf("CompleteStream() error: %v", err)
+	}
+
+	var chunks []core.StreamChunk
+	for c := range ch {
+		chunks = append(chunks, c)
+	}
+
+	if len(chunks) != 4 {
+		t.Fatalf("chunks len = %d, want 4: %#v", len(chunks), chunks)
+	}
+	start := chunks[1].Choices[0].Delta.ToolCalls[0]
+	if start.Index == nil || *start.Index != 0 {
+		t.Fatalf("tool call index = %#v, want OpenAI tool index 0", start.Index)
+	}
+	args := chunks[2].Choices[0].Delta.ToolCalls[0]
+	if args.Index == nil || *args.Index != 0 || args.Function.Arguments != `{"city"` {
+		t.Fatalf("args delta = %#v, want tool index 0 with city fragment", args)
 	}
 }
 

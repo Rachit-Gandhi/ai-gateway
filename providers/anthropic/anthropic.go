@@ -572,6 +572,8 @@ func (p *Provider) CompleteStream(ctx context.Context, req core.Request) (<-chan
 
 		var msgID, model string
 		var promptTokens, cacheReadTokens, cacheWriteTokens int
+		toolCallIndexes := make(map[int]int)
+		nextToolCallIndex := 0
 		scanner := core.NewSSEScanner(httpResp.Body)
 		for scanner.Scan() {
 			line := scanner.Text()
@@ -601,16 +603,19 @@ func (p *Provider) CompleteStream(ctx context.Context, req core.Request) (<-chan
 			case "content_block_start":
 				var evt anthropicStreamContentBlockStart
 				if json.Unmarshal([]byte(data), &evt) == nil && evt.ContentBlock.Type == "tool_use" {
+					toolCallIndex := nextToolCallIndex
+					toolCallIndexes[evt.Index] = toolCallIndex
+					nextToolCallIndex++
 					ch <- core.StreamChunk{
 						ID:    msgID,
 						Model: model,
 						Choices: []core.StreamChoice{
 							{
-								Index: evt.Index,
+								Index: toolCallIndex,
 								Delta: core.MessageDelta{
 									ToolCalls: []core.ToolCall{
 										{
-											Index: streamIndexPtr(evt.Index),
+											Index: streamIndexPtr(toolCallIndex),
 											ID:    evt.ContentBlock.ID,
 											Type:  "function",
 											Function: core.FunctionCall{
@@ -627,16 +632,20 @@ func (p *Provider) CompleteStream(ctx context.Context, req core.Request) (<-chan
 				var evt anthropicStreamContentDelta
 				if json.Unmarshal([]byte(data), &evt) == nil {
 					if evt.Delta.Type == "input_json_delta" {
+						toolCallIndex, ok := toolCallIndexes[evt.Index]
+						if !ok {
+							toolCallIndex = evt.Index
+						}
 						ch <- core.StreamChunk{
 							ID:    msgID,
 							Model: model,
 							Choices: []core.StreamChoice{
 								{
-									Index: evt.Index,
+									Index: toolCallIndex,
 									Delta: core.MessageDelta{
 										ToolCalls: []core.ToolCall{
 											{
-												Index: streamIndexPtr(evt.Index),
+												Index: streamIndexPtr(toolCallIndex),
 												Type:  "function",
 												Function: core.FunctionCall{
 													Arguments: evt.Delta.PartialJSON,

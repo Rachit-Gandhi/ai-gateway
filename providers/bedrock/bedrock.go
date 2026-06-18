@@ -496,6 +496,13 @@ func bedrockBuildAnthropicMessages(req core.Request) ([]bedrockAnthropicMessage,
 				ToolUseID: msg.ToolCallID,
 				Content:   msg.Content,
 			}
+			if n := len(messages); n > 0 && messages[n-1].Role == core.RoleUser {
+				if blocks, ok := messages[n-1].Content.([]bedrockAnthropicBlock); ok {
+					blocks = append(blocks, block)
+					messages[n-1].Content = blocks
+					continue
+				}
+			}
 			messages = append(messages, bedrockAnthropicMessage{Role: core.RoleUser, Content: []bedrockAnthropicBlock{block}})
 		default:
 			messages = append(messages, bedrockAnthropicMessage{Role: msg.Role, Content: bedrockAnthropicContent(msg)})
@@ -833,6 +840,8 @@ func (p *Provider) CompleteStream(ctx context.Context, req core.Request) (<-chan
 		stream := output.GetStream()
 		defer func() { _ = stream.Close() }()
 
+		toolCallIndexes := make(map[int]int)
+		nextToolCallIndex := 0
 		for event := range stream.Events() {
 			if e, ok := event.(*types.ResponseStreamMemberChunk); ok {
 				var eventType struct {
@@ -855,13 +864,16 @@ func (p *Provider) CompleteStream(ctx context.Context, req core.Request) (<-chan
 					if err := json.Unmarshal(e.Value.Bytes, &start); err != nil || start.ContentBlock.Type != "tool_use" {
 						continue
 					}
+					toolCallIndex := nextToolCallIndex
+					toolCallIndexes[start.Index] = toolCallIndex
+					nextToolCallIndex++
 					ch <- core.StreamChunk{
 						Model: req.Model,
 						Choices: []core.StreamChoice{{
-							Index: start.Index,
+							Index: toolCallIndex,
 							Delta: core.MessageDelta{
 								ToolCalls: []core.ToolCall{{
-									Index: bedrockStreamIndexPtr(start.Index),
+									Index: bedrockStreamIndexPtr(toolCallIndex),
 									ID:    start.ContentBlock.ID,
 									Type:  "function",
 									Function: core.FunctionCall{
@@ -884,13 +896,17 @@ func (p *Provider) CompleteStream(ctx context.Context, req core.Request) (<-chan
 						continue
 					}
 					if delta.Delta.Type == "input_json_delta" {
+						toolCallIndex, ok := toolCallIndexes[delta.Index]
+						if !ok {
+							toolCallIndex = delta.Index
+						}
 						ch <- core.StreamChunk{
 							Model: req.Model,
 							Choices: []core.StreamChoice{{
-								Index: delta.Index,
+								Index: toolCallIndex,
 								Delta: core.MessageDelta{
 									ToolCalls: []core.ToolCall{{
-										Index: bedrockStreamIndexPtr(delta.Index),
+										Index: bedrockStreamIndexPtr(toolCallIndex),
 										Type:  "function",
 										Function: core.FunctionCall{
 											Arguments: delta.Delta.PartialJSON,
