@@ -101,6 +101,54 @@ func TestRequest_Validate(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name: "invalid max completion tokens",
+			req: Request{
+				Model: "gpt-4o",
+				Messages: []Message{
+					{Role: "user", Content: "Hello"},
+				},
+				MaxCompletionTokens: intPtr(0),
+			},
+			wantErr: true,
+			errMsg:  "max_completion_tokens must be positive",
+		},
+		{
+			name: "invalid top_p",
+			req: Request{
+				Model: "gpt-4o",
+				Messages: []Message{
+					{Role: "user", Content: "Hello"},
+				},
+				TopP: floatPtr(1.5),
+			},
+			wantErr: true,
+			errMsg:  "top_p must be between 0 and 1",
+		},
+		{
+			name: "invalid presence penalty",
+			req: Request{
+				Model: "gpt-4o",
+				Messages: []Message{
+					{Role: "user", Content: "Hello"},
+				},
+				PresencePenalty: floatPtr(2.1),
+			},
+			wantErr: true,
+			errMsg:  "presence_penalty must be between -2 and 2",
+		},
+		{
+			name: "invalid frequency penalty",
+			req: Request{
+				Model: "gpt-4o",
+				Messages: []Message{
+					{Role: "user", Content: "Hello"},
+				},
+				FrequencyPenalty: floatPtr(-2.1),
+			},
+			wantErr: true,
+			errMsg:  "frequency_penalty must be between -2 and 2",
+		},
 	}
 
 	for _, tt := range tests {

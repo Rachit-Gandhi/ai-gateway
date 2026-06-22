@@ -14,6 +14,11 @@ func (stringReadCloser) Close() error { return nil }
 
 func sseBody(s string) io.ReadCloser { return stringReadCloser{strings.NewReader(s)} }
 
+type errorReadCloser struct{}
+
+func (errorReadCloser) Read([]byte) (int, error) { return 0, errBoom }
+func (errorReadCloser) Close() error             { return nil }
+
 func collect(ch <-chan core.StreamChunk) []core.StreamChunk {
 	var out []core.StreamChunk
 	for c := range ch {
@@ -77,4 +82,18 @@ func TestStreamSSE_Contract(t *testing.T) {
 			t.Errorf("finish_reason = %q, want tool_calls", chunks[1].Choices[0].FinishReason)
 		}
 	})
+}
+
+func TestStreamSSE_ReportsScannerError(t *testing.T) {
+	chunks := collect(StreamSSE(errorReadCloser{}))
+
+	if len(chunks) != 1 {
+		t.Fatalf("got %d chunks, want one terminal error chunk", len(chunks))
+	}
+	if chunks[0].Error == nil {
+		t.Fatal("error chunk has nil Error")
+	}
+	if chunks[0].Error != errBoom {
+		t.Fatalf("error chunk = %v, want %v", chunks[0].Error, errBoom)
+	}
 }
