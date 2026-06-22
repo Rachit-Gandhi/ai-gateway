@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -14,6 +15,7 @@ type mockPlugin struct {
 	name    string
 	typ     PluginType
 	execFn  func(ctx context.Context, pctx *Context) error
+	closeFn func() error
 	initErr error
 }
 
@@ -23,6 +25,12 @@ func (m *mockPlugin) Init(_ map[string]interface{}) error { return m.initErr }
 func (m *mockPlugin) Execute(ctx context.Context, pctx *Context) error {
 	if m.execFn != nil {
 		return m.execFn(ctx, pctx)
+	}
+	return nil
+}
+func (m *mockPlugin) Close() error {
+	if m.closeFn != nil {
+		return m.closeFn()
 	}
 	return nil
 }
@@ -155,6 +163,26 @@ func TestManager_RunBefore_RejectWithError_FallsBackToErrorMessage(t *testing.T)
 	}
 }
 
+func TestManager_RunBefore_PanicReturnsError(t *testing.T) {
+	m := NewManager()
+	_ = m.Register(StageBeforeRequest, &mockPlugin{
+		name: "panic-guard",
+		typ:  TypeGuardrail,
+		execFn: func(context.Context, *Context) error {
+			panic("boom")
+		},
+	})
+
+	pctx := NewContext(&providers.Request{Model: "gpt-4o"})
+	err := m.RunBefore(context.Background(), pctx)
+	if err == nil {
+		t.Fatal("expected panic to be converted to an error")
+	}
+	if !strings.Contains(err.Error(), "plugin panic-guard panicked") {
+		t.Fatalf("error = %q, want plugin panic context", err.Error())
+	}
+}
+
 func TestManager_RunAfter(t *testing.T) {
 	m := NewManager()
 	called := false
@@ -226,6 +254,61 @@ func TestManager_RunAfter_RejectWithErrorAndEmptyReason_UsesErrorMessage(t *test
 	}
 	if rejection.Reason != "schema mismatch" {
 		t.Fatalf("reason = %q, want %q", rejection.Reason, "schema mismatch")
+	}
+}
+
+func TestManager_RunOnError_PanicDoesNotPropagate(t *testing.T) {
+	m := NewManager()
+	_ = m.Register(StageOnError, &mockPlugin{
+		name: "panic-reporter",
+		typ:  TypeLogging,
+		execFn: func(context.Context, *Context) error {
+			panic("reporter failed")
+		},
+	})
+
+	m.RunOnError(context.Background(), NewContext(&providers.Request{Model: "gpt-4o"}))
+}
+
+func TestManager_CloseClosesRegisteredPlugins(t *testing.T) {
+	m := NewManager()
+	var closed int
+	_ = m.Register(StageBeforeRequest, &mockPlugin{
+		name: "closer",
+		typ:  TypeLogging,
+		closeFn: func() error {
+			closed++
+			return nil
+		},
+	})
+
+	if err := m.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+	if closed != 1 {
+		t.Fatalf("closed = %d, want 1", closed)
+	}
+}
+
+func TestManager_CloseCallsClosePerRegistration(t *testing.T) {
+	m := NewManager()
+	var closed int
+	p := &mockPlugin{
+		name: "multi-stage",
+		typ:  TypeLogging,
+		closeFn: func() error {
+			closed++
+			return nil
+		},
+	}
+	_ = m.Register(StageBeforeRequest, p)
+	_ = m.Register(StageAfterRequest, p)
+
+	if err := m.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+	if closed != 2 {
+		t.Fatalf("closed = %d, want 2 because Close is called once per registration", closed)
 	}
 }
 

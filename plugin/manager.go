@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -142,14 +143,21 @@ func (m *Manager) RunOnError(ctx context.Context, pctx *Context) {
 // global TracerProvider is installed the span is a no-op and adds
 // effectively zero overhead. The span records the rejection outcome
 // via ferro.plugin.outcome / ferro.plugin.reason attributes.
-func (m *Manager) executePlugin(ctx context.Context, p Plugin, pctx *Context, stage string) error {
+func (m *Manager) executePlugin(ctx context.Context, p Plugin, pctx *Context, stage string) (err error) {
 	spanName := "plugin." + stage + "." + p.Name()
 	ctx, span := pluginTracer().Start(ctx, spanName, trace.WithAttributes(
 		pluginAttrs(p.Name(), string(p.Type()), stage)...,
 	))
-	defer span.End()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("plugin %s panicked at %s: %v", p.Name(), stage, recovered)
+			span.SetAttributes(attribute.String(observability.AttrFerroPluginOutcome, "error"))
+			span.SetStatus(codes.Error, err.Error())
+		}
+		span.End()
+	}()
 
-	err := p.Execute(ctx, pctx)
+	err = p.Execute(ctx, pctx)
 
 	switch {
 	case pctx.Reject:
@@ -162,6 +170,30 @@ func (m *Manager) executePlugin(ctx context.Context, p Plugin, pctx *Context, st
 		span.SetStatus(codes.Error, err.Error())
 	default:
 		span.SetAttributes(attribute.String(observability.AttrFerroPluginOutcome, "ok"))
+	}
+	return err
+}
+
+// Close releases resources for all currently registered plugin registrations
+// and clears the manager. A plugin instance registered in multiple stages will
+// receive one Close call per registration; Plugin implementations must make
+// Close idempotent.
+func (m *Manager) Close() error {
+	m.mu.Lock()
+	plugins := make([]Plugin, 0, len(m.before)+len(m.after)+len(m.onErr))
+	plugins = append(plugins, m.before...)
+	plugins = append(plugins, m.after...)
+	plugins = append(plugins, m.onErr...)
+	m.before = nil
+	m.after = nil
+	m.onErr = nil
+	m.mu.Unlock()
+
+	var err error
+	for _, p := range plugins {
+		if closeErr := p.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("plugin %s close failed: %w", p.Name(), closeErr))
+		}
 	}
 	return err
 }
