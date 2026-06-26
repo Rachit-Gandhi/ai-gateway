@@ -181,6 +181,9 @@ func TestManager_RunBefore_PanicReturnsError(t *testing.T) {
 	if !strings.Contains(err.Error(), "plugin panic-guard panicked") {
 		t.Fatalf("error = %q, want plugin panic context", err.Error())
 	}
+	if !strings.Contains(err.Error(), "runtime/debug.Stack") {
+		t.Fatalf("error = %q, want panic stack", err.Error())
+	}
 }
 
 func TestManager_RunAfter(t *testing.T) {
@@ -259,15 +262,20 @@ func TestManager_RunAfter_RejectWithErrorAndEmptyReason_UsesErrorMessage(t *test
 
 func TestManager_RunOnError_PanicDoesNotPropagate(t *testing.T) {
 	m := NewManager()
+	called := false
 	_ = m.Register(StageOnError, &mockPlugin{
 		name: "panic-reporter",
 		typ:  TypeLogging,
 		execFn: func(context.Context, *Context) error {
+			called = true
 			panic("reporter failed")
 		},
 	})
 
 	m.RunOnError(context.Background(), NewContext(&providers.Request{Model: "gpt-4o"}))
+	if !called {
+		t.Fatal("expected on-error plugin to run")
+	}
 }
 
 func TestManager_CloseClosesRegisteredPlugins(t *testing.T) {
@@ -290,7 +298,7 @@ func TestManager_CloseClosesRegisteredPlugins(t *testing.T) {
 	}
 }
 
-func TestManager_CloseCallsClosePerRegistration(t *testing.T) {
+func TestManager_CloseCallsCloseOncePerInstance(t *testing.T) {
 	m := NewManager()
 	var closed int
 	p := &mockPlugin{
@@ -307,8 +315,30 @@ func TestManager_CloseCallsClosePerRegistration(t *testing.T) {
 	if err := m.Close(); err != nil {
 		t.Fatalf("Close() error: %v", err)
 	}
+	if closed != 1 {
+		t.Fatalf("closed = %d, want 1 because Close is deduplicated per plugin instance", closed)
+	}
+}
+
+func TestManager_CloseClosesDistinctInstances(t *testing.T) {
+	m := NewManager()
+	var closed int
+	for _, name := range []string{"first", "second"} {
+		_ = m.Register(StageBeforeRequest, &mockPlugin{
+			name: name,
+			typ:  TypeLogging,
+			closeFn: func() error {
+				closed++
+				return nil
+			},
+		})
+	}
+
+	if err := m.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
 	if closed != 2 {
-		t.Fatalf("closed = %d, want 2 because Close is called once per registration", closed)
+		t.Fatalf("closed = %d, want 2 distinct instances closed", closed)
 	}
 }
 

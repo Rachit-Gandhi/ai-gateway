@@ -415,7 +415,9 @@ func (g *Gateway) Route(ctx context.Context, req providers.Request) (*providers.
 	mcpRegistrySnapshot := g.mcpRegistry
 	mcpExecutorSnapshot := g.mcpExecutor
 	plugins := g.plugins
+	releasePlugins := acquirePluginManager(plugins)
 	g.mu.RUnlock()
+	defer releasePlugins()
 	ctx, span := obs.StartRequestSpan(ctx, observability.RequestAttrs{
 		Operation:       "chat",
 		RequestModel:    req.Model,
@@ -1209,6 +1211,13 @@ func closePluginManager(plugins *plugin.Manager) error {
 	return plugins.Close()
 }
 
+func acquirePluginManager(plugins *plugin.Manager) func() {
+	if plugins == nil || !plugins.HasPlugins() {
+		return func() {}
+	}
+	return plugins.Acquire()
+}
+
 // RouteStream runs before-request plugins then returns a metered streaming
 // response channel. Provider resolution follows the configured strategy mode,
 // then falls back to any registered provider that supports the requested model
@@ -1238,7 +1247,12 @@ func (g *Gateway) RouteStream(ctx context.Context, req providers.Request) (<-cha
 	obsEventsActive := g.obsEventsActive
 	mcpRegistrySnapshot := g.mcpRegistry
 	plugins := g.plugins
+	releasePlugins := acquirePluginManager(plugins)
 	g.mu.RUnlock()
+	var releasePluginsOnce sync.Once
+	releasePluginManager := func() {
+		releasePluginsOnce.Do(releasePlugins)
+	}
 	ctx, span := obs.StartRequestSpan(ctx, observability.RequestAttrs{
 		Operation:       "chat",
 		RequestModel:    req.Model,
@@ -1263,6 +1277,7 @@ func (g *Gateway) RouteStream(ctx context.Context, req providers.Request) (<-cha
 	// entirely; we wrap its non-streaming result into a channel here.
 	hasMCP := mcpRegistrySnapshot != nil && mcpRegistrySnapshot.HasServers()
 	if hasMCP {
+		releasePluginManager()
 		// Do not force req.Stream = false here: let Route() capture the
 		// original stream flag via its own originalStream variable so that
 		// emitted events correctly reflect stream: true for RouteStream callers.
@@ -1285,14 +1300,18 @@ func (g *Gateway) RouteStream(ctx context.Context, req providers.Request) (<-cha
 		if err != nil {
 			plugin.PutContext(pctx)
 			pctx = nil
+			releasePluginManager()
 			metrics.ForRequest("", req.Model).Rejected.Inc()
 			return nil, err
 		}
 		if early != nil {
 			plugin.PutContext(pctx)
 			pctx = nil
+			releasePluginManager()
 			return responseStream(early), nil
 		}
+	} else {
+		releasePluginManager()
 	}
 
 	// Resolve provider according to strategy mode.
@@ -1310,6 +1329,7 @@ func (g *Gateway) RouteStream(ctx context.Context, req providers.Request) (<-cha
 			pctx.Error = err
 			plugins.RunOnError(ctx, pctx)
 			plugin.PutContext(pctx)
+			releasePluginManager()
 		}
 		return nil, err
 	}
@@ -1321,6 +1341,7 @@ func (g *Gateway) RouteStream(ctx context.Context, req providers.Request) (<-cha
 			pctx.Error = err
 			plugins.RunOnError(ctx, pctx)
 			plugin.PutContext(pctx)
+			releasePluginManager()
 		}
 		return nil, err
 	}
@@ -1348,6 +1369,7 @@ func (g *Gateway) RouteStream(ctx context.Context, req providers.Request) (<-cha
 			pctx.Error = err
 			plugins.RunOnError(ctx, pctx)
 			plugin.PutContext(pctx)
+			releasePluginManager()
 		}
 		metrics.ForRequest(providerName, req.Model).Error.Inc()
 		metrics.ForProviderError(providerName, errType).Inc()
@@ -1402,6 +1424,7 @@ func (g *Gateway) RouteStream(ctx context.Context, req providers.Request) (<-cha
 			}
 			plugin.PutContext(pctx)
 			pctx = nil
+			releasePluginManager()
 			return err
 		}
 		meta.ErrorFn = func(ctx context.Context, err error) {
@@ -1412,6 +1435,7 @@ func (g *Gateway) RouteStream(ctx context.Context, req providers.Request) (<-cha
 			plugins.RunOnError(ctx, pctx)
 			plugin.PutContext(pctx)
 			pctx = nil
+			releasePluginManager()
 		}
 	}
 
@@ -2115,9 +2139,10 @@ func (g *Gateway) FindStreamingByModel(model string) (providers.StreamProvider, 
 func (g *Gateway) Close() error {
 	g.closeOnce.Do(func() {
 		g.shutdownCancel()
-		g.mu.RLock()
+		g.mu.Lock()
 		plugins := g.plugins
-		g.mu.RUnlock()
+		g.plugins = plugin.NewManager()
+		g.mu.Unlock()
 		if err := closePluginManager(plugins); err != nil {
 			slog.Warn("plugin close failed during gateway shutdown", "error", err)
 		}

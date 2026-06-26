@@ -2686,6 +2686,91 @@ func TestGateway_ReloadConfig_ClosesOldPlugins(t *testing.T) {
 	}
 }
 
+func TestGateway_ReloadConfig_WaitsForInFlightRoutePlugins(t *testing.T) {
+	provider := newGateMockProvider(&providers.Response{ID: "ok", Model: "gpt-4o"}, nil)
+	gw, err := New(Config{
+		Strategy: StrategyConfig{Mode: ModeSingle},
+		Targets:  []Target{{VirtualKey: provider.Name()}},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = gw.Close() })
+	gw.RegisterProvider(provider)
+
+	oldClosed := make(chan struct{})
+	var closeOnce sync.Once
+	afterRan := make(chan struct{})
+	var afterOnce sync.Once
+	if err := gw.RegisterPlugin(plugin.StageAfterRequest, &testPlugin{
+		name: "in-flight-after",
+		typ:  plugin.TypeLogging,
+		execFn: func(context.Context, *plugin.Context) error {
+			afterOnce.Do(func() { close(afterRan) })
+			return nil
+		},
+		closeFn: func() error {
+			closeOnce.Do(func() { close(oldClosed) })
+			return nil
+		},
+	}); err != nil {
+		t.Fatalf("RegisterPlugin: %v", err)
+	}
+
+	routeDone := make(chan error, 1)
+	go func() {
+		_, routeErr := gw.Route(context.Background(), providers.Request{
+			Model:    "gpt-4o",
+			Messages: []providers.Message{{Role: "user", Content: "hi"}},
+		})
+		routeDone <- routeErr
+	}()
+
+	provider.waitActive(t, 1)
+	reloadDone := make(chan error, 1)
+	go func() {
+		reloadDone <- gw.ReloadConfig(Config{
+			Strategy: StrategyConfig{Mode: ModeSingle},
+			Targets:  []Target{{VirtualKey: provider.Name()}},
+		})
+	}()
+
+	select {
+	case <-oldClosed:
+		t.Fatal("old plugin manager closed while an in-flight route could still run after/error plugins")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	provider.releaseAll()
+
+	select {
+	case err := <-routeDone:
+		if err != nil {
+			t.Fatalf("Route: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for route")
+	}
+	select {
+	case <-afterRan:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for after plugin")
+	}
+	select {
+	case err := <-reloadDone:
+		if err != nil {
+			t.Fatalf("ReloadConfig: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for reload")
+	}
+	select {
+	case <-oldClosed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for old plugin close")
+	}
+}
+
 // ── mockEmbeddingProvider ─────────────────────────────────────────────────────
 
 type mockEmbeddingProvider struct {

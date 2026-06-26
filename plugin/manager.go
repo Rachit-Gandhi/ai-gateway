@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
+	"runtime/debug"
 	"sync"
 
 	"github.com/ferro-labs/ai-gateway/internal/logging"
@@ -37,15 +39,46 @@ func pluginAttrs(name, kind, stage string) []attribute.KeyValue {
 
 // Manager manages plugin lifecycle and execution.
 type Manager struct {
-	before []Plugin
-	after  []Plugin
-	onErr  []Plugin
-	mu     sync.RWMutex
+	before      []Plugin
+	after       []Plugin
+	onErr       []Plugin
+	mu          sync.RWMutex
+	lifecycleMu sync.Mutex
+	lifecycle   *sync.Cond
+	active      int
+	closed      bool
 }
 
 // NewManager creates a new plugin manager.
 func NewManager() *Manager {
-	return &Manager{}
+	m := &Manager{}
+	m.lifecycle = sync.NewCond(&m.lifecycleMu)
+	return m
+}
+
+// Acquire marks the manager as in use until the returned release function is
+// called. Close waits for active users before releasing plugin resources.
+func (m *Manager) Acquire() func() {
+	m.lifecycleMu.Lock()
+	m.ensureLifecycleLocked()
+	if m.closed {
+		m.lifecycleMu.Unlock()
+		return func() {}
+	}
+	m.active++
+	m.lifecycleMu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			m.lifecycleMu.Lock()
+			m.active--
+			if m.active == 0 {
+				m.lifecycle.Broadcast()
+			}
+			m.lifecycleMu.Unlock()
+		})
+	}
 }
 
 // Register registers a plugin at the given stage.
@@ -150,7 +183,7 @@ func (m *Manager) executePlugin(ctx context.Context, p Plugin, pctx *Context, st
 	))
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			err = fmt.Errorf("plugin %s panicked at %s: %v", p.Name(), stage, recovered)
+			err = fmt.Errorf("plugin %s panicked at %s: %v\n%s", p.Name(), stage, recovered, debug.Stack())
 			span.SetAttributes(attribute.String(observability.AttrFerroPluginOutcome, "error"))
 			span.SetStatus(codes.Error, err.Error())
 		}
@@ -174,11 +207,21 @@ func (m *Manager) executePlugin(ctx context.Context, p Plugin, pctx *Context, st
 	return err
 }
 
-// Close releases resources for all currently registered plugin registrations
-// and clears the manager. A plugin instance registered in multiple stages will
-// receive one Close call per registration; Plugin implementations must make
-// Close idempotent.
+// Close waits for active users, releases each registered plugin instance once,
+// and clears the manager.
 func (m *Manager) Close() error {
+	m.lifecycleMu.Lock()
+	m.ensureLifecycleLocked()
+	for m.active > 0 {
+		m.lifecycle.Wait()
+	}
+	if m.closed {
+		m.lifecycleMu.Unlock()
+		return nil
+	}
+	m.closed = true
+	m.lifecycleMu.Unlock()
+
 	m.mu.Lock()
 	plugins := make([]Plugin, 0, len(m.before)+len(m.after)+len(m.onErr))
 	plugins = append(plugins, m.before...)
@@ -190,12 +233,42 @@ func (m *Manager) Close() error {
 	m.mu.Unlock()
 
 	var err error
-	for _, p := range plugins {
+	for _, p := range uniquePluginInstances(plugins) {
 		if closeErr := p.Close(); closeErr != nil {
 			err = errors.Join(err, fmt.Errorf("plugin %s close failed: %w", p.Name(), closeErr))
 		}
 	}
 	return err
+}
+
+func (m *Manager) ensureLifecycleLocked() {
+	if m.lifecycle == nil {
+		m.lifecycle = sync.NewCond(&m.lifecycleMu)
+	}
+}
+
+func uniquePluginInstances(plugins []Plugin) []Plugin {
+	unique := make([]Plugin, 0, len(plugins))
+	seen := make(map[pluginInstanceKey]struct{}, len(plugins))
+	for _, p := range plugins {
+		v := reflect.ValueOf(p)
+		if v.Kind() != reflect.Pointer || v.IsNil() {
+			unique = append(unique, p)
+			continue
+		}
+		key := pluginInstanceKey{typ: v.Type(), ptr: v.Pointer()}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		unique = append(unique, p)
+	}
+	return unique
+}
+
+type pluginInstanceKey struct {
+	typ reflect.Type
+	ptr uintptr
 }
 
 // HasPlugins returns true if any plugins are registered.
