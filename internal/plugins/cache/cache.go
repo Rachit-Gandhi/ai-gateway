@@ -10,7 +10,9 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"hash"
+	"sort"
 	"strconv"
 	"time"
 
@@ -26,7 +28,7 @@ func init() {
 }
 
 // ResponseCache is a transform plugin that caches LLM responses using
-// exact-match hashing of the request (model + messages + logprobs + toplogprobs(optional)).
+// exact-match hashing of the request fields that can affect provider output.
 // It aliases Memory from the internal cache package.
 type ResponseCache struct {
 	*internalCache.Memory
@@ -98,22 +100,103 @@ func (c *ResponseCache) Execute(_ context.Context, pctx *plugin.Context) error {
 
 func cacheKey(req *providers.Request) string {
 	h := sha256.New()
+	writeCacheKeyString(h, "model")
 	writeCacheKeyString(h, req.Model)
+	writeCacheKeyString(h, "messages")
+	writeCacheKeyInt(h, len(req.Messages))
 	for _, m := range req.Messages {
 		writeCacheKeyString(h, m.Role)
 		writeCacheKeyString(h, m.Name)
 		writeCacheKeyString(h, m.Content)
 	}
-	if req.LogProbs {
-		writeCacheKeyString(h, "true")
-		if req.TopLogProbs != nil {
-			writeCacheKeyString(h, strconv.Itoa(*req.TopLogProbs))
-		}
-	} else {
-		writeCacheKeyString(h, "false")
-	}
+	writeCacheKeyOptionalFloat64(h, "temperature", req.Temperature)
+	writeCacheKeyOptionalFloat64(h, "top_p", req.TopP)
+	writeCacheKeyOptionalInt(h, "n", req.N)
+	writeCacheKeyOptionalInt64(h, "seed", req.Seed)
+	writeCacheKeyOptionalInt(h, "max_tokens", req.MaxTokens)
+	writeCacheKeyOptionalInt(h, "max_completion_tokens", req.MaxCompletionTokens)
+	writeCacheKeyOptionalFloat64(h, "presence_penalty", req.PresencePenalty)
+	writeCacheKeyOptionalFloat64(h, "frequency_penalty", req.FrequencyPenalty)
+	writeCacheKeyStringSlice(h, "stop", req.Stop)
+	writeCacheKeyJSON(h, "tools", req.Tools)
+	writeCacheKeyJSON(h, "tool_choice", req.ToolChoice)
+	writeCacheKeyJSON(h, "response_format", req.ResponseFormat)
+	writeCacheKeyBool(h, "logprobs", req.LogProbs)
+	writeCacheKeyOptionalInt(h, "top_logprobs", req.TopLogProbs)
+	writeCacheKeyBool(h, "stream", req.Stream)
+	writeCacheKeyString(h, "user")
+	writeCacheKeyString(h, req.User)
+	writeCacheKeyFloatMap(h, "logit_bias", req.LogitBias)
 
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+func writeCacheKeyBool(h hash.Hash, label string, v bool) {
+	writeCacheKeyString(h, label)
+	writeCacheKeyString(h, strconv.FormatBool(v))
+}
+
+func writeCacheKeyInt(h hash.Hash, v int) {
+	writeCacheKeyString(h, strconv.Itoa(v))
+}
+
+func writeCacheKeyOptionalInt(h hash.Hash, label string, v *int) {
+	writeCacheKeyString(h, label)
+	if v == nil {
+		writeCacheKeyString(h, "<nil>")
+		return
+	}
+	writeCacheKeyString(h, strconv.Itoa(*v))
+}
+
+func writeCacheKeyOptionalInt64(h hash.Hash, label string, v *int64) {
+	writeCacheKeyString(h, label)
+	if v == nil {
+		writeCacheKeyString(h, "<nil>")
+		return
+	}
+	writeCacheKeyString(h, strconv.FormatInt(*v, 10))
+}
+
+func writeCacheKeyOptionalFloat64(h hash.Hash, label string, v *float64) {
+	writeCacheKeyString(h, label)
+	if v == nil {
+		writeCacheKeyString(h, "<nil>")
+		return
+	}
+	writeCacheKeyString(h, strconv.FormatFloat(*v, 'g', -1, 64))
+}
+
+func writeCacheKeyStringSlice(h hash.Hash, label string, values []string) {
+	writeCacheKeyString(h, label)
+	writeCacheKeyInt(h, len(values))
+	for _, value := range values {
+		writeCacheKeyString(h, value)
+	}
+}
+
+func writeCacheKeyFloatMap(h hash.Hash, label string, values map[string]float64) {
+	writeCacheKeyString(h, label)
+	writeCacheKeyInt(h, len(values))
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		writeCacheKeyString(h, key)
+		writeCacheKeyString(h, strconv.FormatFloat(values[key], 'g', -1, 64))
+	}
+}
+
+func writeCacheKeyJSON(h hash.Hash, label string, v any) {
+	writeCacheKeyString(h, label)
+	b, err := json.Marshal(v)
+	if err != nil {
+		writeCacheKeyString(h, err.Error())
+		return
+	}
+	writeCacheKeyString(h, string(b))
 }
 
 func writeCacheKeyString(h hash.Hash, s string) {

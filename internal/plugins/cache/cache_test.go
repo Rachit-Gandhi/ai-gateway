@@ -398,6 +398,75 @@ func TestCacheKey_DifferentTopLogProbsProducesDistinctKey(t *testing.T) {
 	}
 }
 
+func TestCacheKey_OutputParamsProduceDistinctKeys(t *testing.T) {
+	base := func() *providers.Request {
+		temp := 0.2
+		topP := 0.9
+		seed := int64(7)
+		maxTokens := 64
+		return &providers.Request{
+			Model:       "gpt-4",
+			Messages:    []providers.Message{{Role: "user", Content: "hello"}},
+			Temperature: &temp,
+			TopP:        &topP,
+			Seed:        &seed,
+			MaxTokens:   &maxTokens,
+			Stop:        []string{"END"},
+		}
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*providers.Request)
+	}{
+		{
+			name: "temperature",
+			mutate: func(req *providers.Request) {
+				v := 0.8
+				req.Temperature = &v
+			},
+		},
+		{
+			name: "top_p",
+			mutate: func(req *providers.Request) {
+				v := 0.5
+				req.TopP = &v
+			},
+		},
+		{
+			name: "seed",
+			mutate: func(req *providers.Request) {
+				v := int64(42)
+				req.Seed = &v
+			},
+		},
+		{
+			name: "max_tokens",
+			mutate: func(req *providers.Request) {
+				v := 128
+				req.MaxTokens = &v
+			},
+		},
+		{
+			name: "stop",
+			mutate: func(req *providers.Request) {
+				req.Stop = []string{"DONE"}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reqA := base()
+			reqB := base()
+			tt.mutate(reqB)
+			if cacheKey(reqA) == cacheKey(reqB) {
+				t.Fatalf("requests with different %s must produce distinct cache keys", tt.name)
+			}
+		})
+	}
+}
+
 func TestCacheKey_LogProbsNilTopLogProbsDoesNotPanic(_ *testing.T) {
 	req := &providers.Request{
 		Model:       "gpt-4",

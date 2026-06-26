@@ -1212,6 +1212,78 @@ func TestShouldRecordCircuitBreakerFailure(t *testing.T) {
 	}
 }
 
+func TestGateway_CircuitBreaker_ReleasesHalfOpenProbeForIgnoredRateLimit(t *testing.T) {
+	var calls atomic.Int32
+	gw, err := New(Config{
+		Strategy: StrategyConfig{Mode: ModeSingle},
+		Targets: []Target{
+			{
+				VirtualKey: mockProviderName,
+				CircuitBreaker: &CircuitBreakerConfig{
+					FailureThreshold: 1,
+					SuccessThreshold: 1,
+					MaxHalfThreshold: 1,
+					Timeout:          "1ms",
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	gw.RegisterProvider(&mockProvider{
+		name:   mockProviderName,
+		models: []string{"gpt-4o"},
+		completeFn: func(context.Context, providers.Request) (*providers.Response, error) {
+			switch calls.Add(1) {
+			case 1:
+				return nil, errors.New("provider API error (500): unavailable")
+			case 2:
+				return nil, errors.New("provider API error (429): rate limited")
+			default:
+				return &providers.Response{ID: "recovered", Model: "gpt-4o"}, nil
+			}
+		},
+	})
+
+	req := providers.Request{Model: "gpt-4o", Messages: []providers.Message{{Role: "user", Content: "hi"}}}
+	if _, err := gw.Route(context.Background(), req); err == nil {
+		t.Fatal("expected first provider failure to open the circuit")
+	}
+	time.Sleep(5 * time.Millisecond)
+	if _, err := gw.Route(context.Background(), req); err == nil || !isRateLimitError(err) {
+		t.Fatalf("expected ignored 429 from half-open probe, got %v", err)
+	}
+	resp, err := gw.Route(context.Background(), req)
+	if err != nil {
+		t.Fatalf("expected released half-open slot to allow recovery probe, got %v", err)
+	}
+	if resp.ID != "recovered" {
+		t.Fatalf("response ID = %q, want recovered", resp.ID)
+	}
+}
+
+func TestRecordStreamCircuitBreakerOutcome_ReleasesHalfOpenProbeForClientCancel(t *testing.T) {
+	cb := circuitbreaker.New(1, 1, 1, 1*time.Millisecond)
+	cb.RecordFailure()
+	time.Sleep(5 * time.Millisecond)
+	_ = cb.State()
+	if !cb.Allow() {
+		t.Fatal("expected first half-open stream probe allowed")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	recordStreamCircuitBreakerOutcome(ctx, cb, mockProviderName, context.Canceled)
+
+	if cb.State() != circuitbreaker.StateHalfOpen {
+		t.Fatalf("expected ignored client cancel to keep half-open state, got %s", cb.State())
+	}
+	if !cb.Allow() {
+		t.Fatal("expected ignored stream outcome to release half-open probe slot")
+	}
+}
+
 func TestGateway_RouteStream_FallbackSkipsOpenCircuitBreakerTarget(t *testing.T) {
 	var selected atomic.Value
 	gw, err := New(Config{

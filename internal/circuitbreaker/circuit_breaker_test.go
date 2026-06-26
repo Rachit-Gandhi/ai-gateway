@@ -178,6 +178,29 @@ func TestDefaultMaxHalfThreshold(t *testing.T) {
 	}
 }
 
+func TestReleaseProbeFreesHalfOpenSlotWithoutRecordingOutcome(t *testing.T) {
+	cb := New(1, 1, 1, 1*time.Millisecond)
+	cb.RecordFailure()
+	time.Sleep(5 * time.Millisecond)
+	_ = cb.State()
+
+	if !cb.Allow() {
+		t.Fatal("expected first half-open probe allowed")
+	}
+	if cb.Allow() {
+		t.Fatal("expected second half-open probe rejected before release")
+	}
+
+	cb.ReleaseProbe()
+
+	if cb.State() != StateHalfOpen {
+		t.Fatalf("expected release to keep half-open state, got %s", cb.State())
+	}
+	if !cb.Allow() {
+		t.Fatal("expected released half-open slot to admit another probe")
+	}
+}
+
 // TestHalfOpenSuccessThresholdWithSlotRecycling verifies that when
 // successThreshold > 1, each RecordSuccess frees a probe slot so that new
 // probes can be admitted before the circuit closes.

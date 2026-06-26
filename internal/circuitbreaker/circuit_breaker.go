@@ -118,6 +118,17 @@ func (cb *CircuitBreaker) Allow() bool {
 	return true
 }
 
+// ReleaseProbe releases an admitted half-open probe without recording success
+// or failure. It is used when the gateway intentionally ignores an outcome,
+// such as rate limits or caller-side cancellation.
+func (cb *CircuitBreaker) ReleaseProbe() {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	if cb.state == StateHalfOpen && cb.halfOpenProbes > 0 {
+		cb.halfOpenProbes--
+	}
+}
+
 // RecordSuccess notifies the breaker that a call succeeded.
 func (cb *CircuitBreaker) RecordSuccess() {
 	cb.mu.Lock()
