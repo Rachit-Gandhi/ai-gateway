@@ -96,18 +96,24 @@ func NewWithOptions(opts Options) (*Provider, error) {
 	cfgOpts := []func(*awsconfig.LoadOptions) error{
 		awsconfig.WithRegion(region),
 	}
+	var clientOpts []func(*bedrockruntime.Options)
 
 	accessKeyID := strings.TrimSpace(opts.AccessKeyID)
 	secretAccessKey := strings.TrimSpace(opts.SecretAccessKey)
 	sessionToken := strings.TrimSpace(opts.SessionToken)
 	bearerToken := strings.TrimSpace(opts.BearerToken)
 	if bearerToken != "" {
+		tokenProvider := bearer.StaticTokenProvider{
+			Token: bearer.Token{Value: bearerToken},
+		}
 		cfgOpts = append(cfgOpts,
-			awsconfig.WithBearerAuthTokenProvider(bearer.StaticTokenProvider{
-				Token: bearer.Token{Value: bearerToken},
-			}),
+			awsconfig.WithBearerAuthTokenProvider(tokenProvider),
 			awsconfig.WithAuthSchemePreference("httpBearerAuth"),
 		)
+		clientOpts = append(clientOpts, func(o *bedrockruntime.Options) {
+			o.BearerAuthTokenProvider = tokenProvider
+			o.AuthSchemePreference = []string{"httpBearerAuth"}
+		})
 	} else if accessKeyID != "" || secretAccessKey != "" || sessionToken != "" {
 		if accessKeyID == "" || secretAccessKey == "" {
 			return nil, fmt.Errorf("bedrock static credentials require both access key ID and secret access key")
@@ -121,7 +127,7 @@ func NewWithOptions(opts Options) (*Provider, error) {
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
 	}
 
-	client := realBedrockClient{bedrockruntime.NewFromConfig(cfg)}
+	client := realBedrockClient{bedrockruntime.NewFromConfig(cfg, clientOpts...)}
 	return &Provider{
 		name:        Name,
 		client:      client,

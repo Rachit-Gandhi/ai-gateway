@@ -96,6 +96,37 @@ func TestNewBedrockWithOptions_BearerTokenConfiguresSDKAuthScheme(t *testing.T) 
 	}
 }
 
+func TestNewBedrockWithOptions_ExplicitBearerTokenOverridesSDKEnvToken(t *testing.T) {
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+	t.Setenv("AWS_BEARER_TOKEN_BEDROCK", "env-bearer-token")
+
+	p, err := NewWithOptions(Options{
+		BearerToken: "explicit-bearer-token",
+	})
+	if err != nil {
+		t.Fatalf("NewBedrockWithOptions() error: %v", err)
+	}
+
+	client, ok := p.client.(realBedrockClient)
+	if !ok {
+		t.Fatalf("client type = %T, want realBedrockClient", p.client)
+	}
+	opts := client.Options()
+	if !slices.Contains(opts.AuthSchemePreference, "httpBearerAuth") {
+		t.Fatalf("AuthSchemePreference = %#v, want httpBearerAuth", opts.AuthSchemePreference)
+	}
+	token, err := opts.BearerAuthTokenProvider.RetrieveBearerToken(context.Background())
+	if err != nil {
+		t.Fatalf("RetrieveBearerToken() error: %v", err)
+	}
+	if token.Value != "explicit-bearer-token" {
+		t.Errorf("bearer token = %q, want explicit-bearer-token", token.Value)
+	}
+	if got := p.AuthHeaders()["Authorization"]; got != "Bearer explicit-bearer-token" {
+		t.Errorf("Authorization = %q, want Bearer explicit-bearer-token", got)
+	}
+}
+
 func TestBedrockProvider_AuthHeaders_SigV4Default(t *testing.T) {
 	p := &Provider{name: Name}
 	if headers := p.AuthHeaders(); len(headers) != 0 {
