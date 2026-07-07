@@ -1,6 +1,7 @@
 {
   "_max_request_bytes_comment": "Max request body bytes for /v1/* and admin write routes. Default: 10485760 (10 MiB). Exceeding returns HTTP 413.",
   "max_request_bytes": 10485760,
+  "_env_interpolation_comment": "LoadConfig expands $VAR and ${VAR} in MCP headers, plugin config, and observability exporter config.",
   "strategy": {
     "mode": "fallback",
     "_unpriced_strategy_comment": "cost-optimized only: fallback (default) | skip | allow",
