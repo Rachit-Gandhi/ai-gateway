@@ -134,6 +134,120 @@ func TestInitRegistersGlobalTracerProvider(t *testing.T) {
 	span2.End()
 }
 
+// TestShutdown_DoesNotResetGlobalInstalledByLaterInit verifies that when
+// Init is called twice (e.g. a config reload path) and the FIRST init's
+// shutdown function is invoked after the SECOND init has already installed
+// its own TracerProvider as the global one, the first shutdown does not
+// clobber the newer, still-active global provider with a no-op.
+func TestShutdown_DoesNotResetGlobalInstalledByLaterInit(t *testing.T) {
+	prev := otel.GetTracerProvider()
+	defer otel.SetTracerProvider(prev)
+
+	cfg := DefaultConfig()
+	cfg.Endpoint = testEndpoint
+	cfg.ShutdownGrace = 200 * time.Millisecond // no live collector; bound the flush
+
+	// First Init installs its TracerProvider as the global.
+	_, shutdown1, err := Init(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("first Init returned error: %v", err)
+	}
+
+	// Second Init (e.g. a config reload) installs a newer TracerProvider as
+	// the global, superseding the first.
+	_, shutdown2, err := Init(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("second Init returned error: %v", err)
+	}
+
+	secondGlobal := otel.GetTracerProvider()
+
+	// Calling the FIRST init's shutdown must not reset the global — it no
+	// longer owns it.
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	_ = shutdown1(ctx)
+
+	if otel.GetTracerProvider() != secondGlobal {
+		t.Fatal("first Init's shutdown reset the global TracerProvider installed by a later Init call")
+	}
+
+	_, span := otel.GetTracerProvider().Tracer("test").Start(context.Background(), "still-active")
+	if !span.IsRecording() {
+		t.Fatal("global tracer provider was disabled by an earlier Init's shutdown")
+	}
+	span.End()
+
+	// The second init's own shutdown still resets the global — it is the
+	// rightful owner.
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel2()
+	_ = shutdown2(ctx2)
+
+	_, span2 := otel.GetTracerProvider().Tracer("test").Start(context.Background(), "late")
+	if span2.IsRecording() {
+		t.Fatal("second Init's shutdown did not reset the global TracerProvider to no-op")
+	}
+	span2.End()
+}
+
+func TestShutdownUsesIndependentDeadlinesForExporterAndTracerProvider(t *testing.T) {
+	grace := 25 * time.Millisecond
+	exporterDone := make(chan struct{})
+	tpCtxErr := make(chan error, 1)
+
+	err := shutdownWithIndependentDeadlines(
+		context.Background(),
+		grace,
+		func(ctx context.Context) error {
+			<-ctx.Done()
+			close(exporterDone)
+			return ctx.Err()
+		},
+		func(ctx context.Context) error {
+			select {
+			case <-exporterDone:
+			case <-time.After(time.Second):
+				t.Fatal("tracer provider shutdown was not called after exporter shutdown")
+			}
+
+			select {
+			case <-ctx.Done():
+				tpCtxErr <- ctx.Err()
+			default:
+				tpCtxErr <- nil
+			}
+			return nil
+		},
+	)
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shutdown error = %v, want context deadline exceeded", err)
+	}
+	if err := <-tpCtxErr; err != nil {
+		t.Fatalf("tracer provider received expired context: %v", err)
+	}
+}
+
+func TestShutdownJoinsExporterAndTracerProviderErrors(t *testing.T) {
+	exporterErr := errors.New("exporter shutdown failed")
+	tpErr := errors.New("tracer provider shutdown failed")
+
+	err := shutdownWithIndependentDeadlines(
+		context.Background(),
+		time.Second,
+		func(context.Context) error { return exporterErr },
+		func(context.Context) error { return tpErr },
+	)
+
+	if !errors.Is(err, exporterErr) {
+		t.Fatalf("shutdown error %v does not include exporter error", err)
+	}
+	if !errors.Is(err, tpErr) {
+		t.Fatalf("shutdown error %v does not include tracer provider error", err)
+	}
+}
+
 func TestEffectiveEndpointEnvWins(t *testing.T) {
 	// OTEL_EXPORTER_OTLP_ENDPOINT takes precedence over a configured endpoint
 	// so container deployments can redirect telemetry by env var.
@@ -608,7 +722,6 @@ func TestNewSpanExporter_WithHeaders(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := DefaultConfig()
 			cfg.Endpoint = testEndpoint
@@ -651,7 +764,6 @@ func TestEndpointIsSecure(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.endpoint, func(t *testing.T) {
 			got := endpointIsSecure(tc.endpoint)
 			if got != tc.want {

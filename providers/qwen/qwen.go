@@ -7,8 +7,8 @@ import (
 	"strings"
 
 	providerhttp "github.com/ferro-labs/ai-gateway/internal/httpclient"
-	"github.com/ferro-labs/ai-gateway/internal/openaicompat"
 	"github.com/ferro-labs/ai-gateway/providers/core"
+	"github.com/ferro-labs/ai-gateway/providers/internal/openaicompat"
 )
 
 const (
@@ -30,20 +30,32 @@ var (
 	_ core.Provider          = (*Provider)(nil)
 	_ core.StreamProvider    = (*Provider)(nil)
 	_ core.ProxiableProvider = (*Provider)(nil)
+	_ core.EmbeddingProvider = (*Provider)(nil)
 )
 
 // New creates a new Qwen provider.
 func New(apiKey, baseURL string) (*Provider, error) {
+	baseURL = strings.TrimSpace(baseURL)
 	if baseURL == "" {
 		baseURL = defaultBaseURL
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
+	if err := core.ValidateBaseURL(Name, baseURL); err != nil {
+		return nil, err
+	}
 	return &Provider{
 		name:       Name,
 		apiKey:     apiKey,
 		baseURL:    baseURL,
 		httpClient: providerhttp.ForProvider(Name),
 	}, nil
+}
+
+// headers returns the auth and content-type headers for Qwen requests.
+func (p *Provider) headers() map[string]string {
+	h := p.AuthHeaders()
+	h["Content-Type"] = "application/json"
+	return h
 }
 
 // Name implements core.Provider.
@@ -83,7 +95,7 @@ func (p *Provider) Complete(ctx context.Context, req core.Request) (*core.Respon
 		URL:        p.baseURL + "/chat/completions",
 		Provider:   p.name,
 		Label:      "qwen",
-		Headers:    map[string]string{"Authorization": "Bearer " + p.apiKey, "Content-Type": "application/json"},
+		Headers:    p.headers(),
 	}, req)
 }
 
@@ -94,6 +106,6 @@ func (p *Provider) CompleteStream(ctx context.Context, req core.Request) (<-chan
 		URL:        p.baseURL + "/chat/completions",
 		Provider:   p.name,
 		Label:      "qwen",
-		Headers:    map[string]string{"Authorization": "Bearer " + p.apiKey, "Content-Type": "application/json"},
+		Headers:    p.headers(),
 	}, req)
 }

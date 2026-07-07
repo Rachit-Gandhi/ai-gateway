@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -11,11 +12,11 @@ type failingConfigStore struct {
 	saveErr error
 }
 
-func (s *failingConfigStore) Save(aigateway.Config) error { return s.saveErr }
-func (s *failingConfigStore) Load() (aigateway.Config, bool, error) {
+func (s *failingConfigStore) Save(context.Context, aigateway.Config) error { return s.saveErr }
+func (s *failingConfigStore) Load(context.Context) (aigateway.Config, bool, error) {
 	return aigateway.Config{}, false, nil
 }
-func (s *failingConfigStore) Delete() error { return nil }
+func (s *failingConfigStore) Delete(context.Context) error { return nil }
 
 func TestGatewayConfigManager_ReloadConfig_RollsBackWhenSaveFails(t *testing.T) {
 	initial := aigateway.Config{
@@ -36,7 +37,7 @@ func TestGatewayConfigManager_ReloadConfig_RollsBackWhenSaveFails(t *testing.T) 
 		Strategy: aigateway.StrategyConfig{Mode: aigateway.ModeFallback},
 		Targets:  []aigateway.Target{{VirtualKey: "openai"}, {VirtualKey: "anthropic"}},
 	}
-	err = mgr.ReloadConfig(next)
+	err = mgr.ReloadConfig(context.Background(), next)
 	if err == nil {
 		t.Fatal("expected save failure")
 	}
@@ -71,7 +72,7 @@ func TestGatewayConfigManager_ReloadConfig_ClassifiesValidationErrors(t *testing
 		Strategy: aigateway.StrategyConfig{Mode: "invalid"},
 		Targets:  []aigateway.Target{{VirtualKey: "openai"}},
 	}
-	err = mgr.ReloadConfig(invalid)
+	err = mgr.ReloadConfig(context.Background(), invalid)
 	if err == nil {
 		t.Fatal("expected validation error")
 	}
@@ -109,11 +110,11 @@ type successConfigStore struct {
 	cfg aigateway.Config
 }
 
-func (s *successConfigStore) Save(c aigateway.Config) error { s.cfg = c; return nil }
-func (s *successConfigStore) Load() (aigateway.Config, bool, error) {
+func (s *successConfigStore) Save(_ context.Context, c aigateway.Config) error { s.cfg = c; return nil }
+func (s *successConfigStore) Load(context.Context) (aigateway.Config, bool, error) {
 	return s.cfg, s.cfg.Strategy.Mode != "", nil
 }
-func (s *successConfigStore) Delete() error { s.cfg = aigateway.Config{}; return nil }
+func (s *successConfigStore) Delete(context.Context) error { s.cfg = aigateway.Config{}; return nil }
 
 func TestGatewayConfigManager_WithPersistedConfig(t *testing.T) {
 	initial := aigateway.Config{
@@ -157,7 +158,7 @@ func TestGatewayConfigManager_ReloadConfig_Success(t *testing.T) {
 		Strategy: aigateway.StrategyConfig{Mode: aigateway.ModeFallback},
 		Targets:  []aigateway.Target{{VirtualKey: "openai"}, {VirtualKey: "anthropic"}},
 	}
-	if err := mgr.ReloadConfig(next); err != nil {
+	if err := mgr.ReloadConfig(context.Background(), next); err != nil {
 		t.Fatalf("ReloadConfig failed: %v", err)
 	}
 	if mgr.GetConfig().Strategy.Mode != aigateway.ModeFallback {
@@ -185,12 +186,12 @@ func TestGatewayConfigManager_ResetConfig(t *testing.T) {
 		Strategy: aigateway.StrategyConfig{Mode: aigateway.ModeFallback},
 		Targets:  []aigateway.Target{{VirtualKey: "openai"}, {VirtualKey: "anthropic"}},
 	}
-	if err := mgr.ReloadConfig(next); err != nil {
+	if err := mgr.ReloadConfig(context.Background(), next); err != nil {
 		t.Fatalf("ReloadConfig failed: %v", err)
 	}
 
 	// Reset to initial.
-	if err := mgr.ResetConfig(); err != nil {
+	if err := mgr.ResetConfig(context.Background()); err != nil {
 		t.Fatalf("ResetConfig failed: %v", err)
 	}
 	if mgr.GetConfig().Strategy.Mode != aigateway.ModeSingle {

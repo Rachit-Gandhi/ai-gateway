@@ -2,12 +2,22 @@ package aigateway
 
 import "github.com/ferro-labs/ai-gateway/mcp"
 
+// DefaultMaxRequestBytes is the default per-request body-size cap (10 MiB).
+// Operators may lower or raise this via Config.MaxRequestBytes.
+const DefaultMaxRequestBytes int64 = 10 * 1024 * 1024
+
 // Config holds the configuration for the AI Gateway.
 type Config struct {
 	// Strategy defines how requests are routed (e.g., single, fallback, loadbalance).
 	Strategy StrategyConfig `json:"strategy" yaml:"strategy"`
 	// Targets is a list of provider targets to route requests to.
 	Targets []Target `json:"targets" yaml:"targets"`
+	// MaxRequestBytes caps the size of incoming request bodies on data-plane routes
+	// (/v1/*) and admin write endpoints. Requests that exceed the limit receive
+	// HTTP 413 Request Entity Too Large before any LLM call is attempted.
+	// 0 (the default when omitted) applies DefaultMaxRequestBytes (10 MiB), which
+	// is well above any realistic chat completion payload.
+	MaxRequestBytes int64 `json:"max_request_bytes,omitempty" yaml:"max_request_bytes,omitempty"`
 	// Plugins configuration (optional).
 	Plugins []PluginConfig `json:"plugins,omitempty" yaml:"plugins,omitempty"`
 	// Aliases maps friendly model names (e.g. "fast", "smart") to concrete model IDs.
@@ -95,10 +105,11 @@ type TracingConfig struct {
 	// PrivacyLevel controls whether prompt/response content is exported.
 	// One of: "none", "metadata" (default), "full".
 	PrivacyLevel string `json:"privacy_level,omitempty" yaml:"privacy_level,omitempty"`
-	// ShutdownGrace is the maximum time the gateway waits for in-flight
-	// OTel exports to drain during graceful shutdown. Accepts any Go
-	// duration string, e.g. "10s", "500ms". Defaults to 10s when empty
-	// or unparseable.
+	// ShutdownGrace is the maximum time each OTel shutdown stage waits.
+	// Exporter shutdown and TracerProvider shutdown each receive this
+	// budget, so total telemetry shutdown may take up to twice this value.
+	// Accepts any Go duration string, e.g. "10s", "500ms". Defaults to 10s
+	// when empty or unparseable.
 	ShutdownGrace string `json:"shutdown_grace,omitempty" yaml:"shutdown_grace,omitempty"`
 	// Headers are additional HTTP/gRPC metadata headers sent with every OTLP
 	// export request. Use this to authenticate with managed backends such as
@@ -221,6 +232,9 @@ type CircuitBreakerConfig struct {
 	// SuccessThreshold is the number of consecutive successes in half-open state
 	// required to close the circuit. Defaults to 1.
 	SuccessThreshold int `json:"success_threshold" yaml:"success_threshold"`
+	// MaxHalfThreshold is the maximum number of concurrent in-flight probes
+	// allowed while the circuit is half-open. Zero or negative values default to 1.
+	MaxHalfThreshold int `json:"max_half_threshold" yaml:"max_half_threshold"`
 	// Timeout is the duration the circuit stays open before transitioning to
 	// half-open (e.g. "30s"). Defaults to "30s".
 	Timeout string `json:"timeout" yaml:"timeout"`
@@ -228,9 +242,9 @@ type CircuitBreakerConfig struct {
 
 // PluginConfig holds plugin configuration.
 type PluginConfig struct {
-	Name    string                 `json:"name" yaml:"name"`
-	Type    string                 `json:"type" yaml:"type"`
-	Stage   string                 `json:"stage" yaml:"stage"`
-	Enabled bool                   `json:"enabled" yaml:"enabled"`
-	Config  map[string]interface{} `json:"config" yaml:"config"`
+	Name    string         `json:"name" yaml:"name"`
+	Type    string         `json:"type" yaml:"type"`
+	Stage   string         `json:"stage" yaml:"stage"`
+	Enabled bool           `json:"enabled" yaml:"enabled"`
+	Config  map[string]any `json:"config" yaml:"config"`
 }

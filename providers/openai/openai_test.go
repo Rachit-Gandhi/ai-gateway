@@ -3,6 +3,7 @@ package openai
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -65,6 +66,8 @@ func TestOpenAIProvider_SupportsModel(t *testing.T) {
 		{"gpt-4-turbo supported", "gpt-4-turbo", true},
 		{"gpt-3.5-turbo supported", "gpt-3.5-turbo", true},
 		{"unknown model passthrough", "gpt-99", true},
+		{"codex family supported", "codex-mini-latest", true},
+		{"sora family supported", "sora-2-pro", true},
 	}
 
 	for _, tt := range tests {
@@ -228,34 +231,6 @@ func TestOpenAIProvider_Complete_MockHTTP(t *testing.T) {
 	}
 }
 
-func TestBuildMessages_AssistantToolCalls(t *testing.T) {
-	msgs := buildMessages([]core.Message{
-		{Role: core.RoleAssistant, ToolCalls: []core.ToolCall{{
-			ID:       "call_1",
-			Type:     "function",
-			Function: core.FunctionCall{Name: "lookup", Arguments: `{"city":"SF"}`},
-		}}},
-		{Role: core.RoleTool, ToolCallID: "call_1", Content: "72F"},
-	})
-	raw, err := json.Marshal(msgs)
-	if err != nil {
-		t.Fatalf("marshal messages: %v", err)
-	}
-	var got []core.Message
-	if err := json.Unmarshal(raw, &got); err != nil {
-		t.Fatalf("unmarshal messages: %v\n%s", err, raw)
-	}
-	if len(got) != 2 {
-		t.Fatalf("messages len = %d, want 2", len(got))
-	}
-	if len(got[0].ToolCalls) != 1 || got[0].ToolCalls[0].Function.Name != "lookup" {
-		t.Fatalf("assistant tool_calls = %#v, want lookup", got[0].ToolCalls)
-	}
-	if got[1].ToolCallID != "call_1" {
-		t.Fatalf("tool_call_id = %q, want call_1", got[1].ToolCallID)
-	}
-}
-
 func TestOpenAIProvider_Complete_DrainsSuccessfulResponseBody(t *testing.T) {
 	var newConnections atomic.Int32
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -357,24 +332,30 @@ func TestOpenAIProvider_CompleteStream_MockSSE(t *testing.T) {
 	}
 
 	var chunks []core.StreamChunk
+	var content strings.Builder
 	for c := range ch {
 		if c.Error != nil {
-			t.Logf("CompleteStream chunk error (SDK may reject mock format): %v", c.Error)
-			return
+			t.Fatalf("stream error: %v", c.Error)
 		}
 		chunks = append(chunks, c)
+		for _, choice := range c.Choices {
+			content.WriteString(choice.Delta.Content)
+		}
 	}
 
-	if len(chunks) == 0 {
-		t.Log("No chunks received — openai-go SDK may not process mock SSE; interface compliance verified by _Interface test")
-		return
+	if len(chunks) != 4 {
+		t.Fatalf("chunks len = %d, want 4: %#v", len(chunks), chunks)
 	}
-
-	// Verify chunk structure when SDK parses successfully.
 	for _, chunk := range chunks {
 		if chunk.ID != "chatcmpl-1" {
-			t.Errorf("chunk ID = %q, want %s", chunk.ID, "chatcmpl-1")
+			t.Errorf("chunk ID = %q, want chatcmpl-1", chunk.ID)
 		}
+	}
+	if content.String() != "Hello world" {
+		t.Errorf("assembled content = %q, want %q", content.String(), "Hello world")
+	}
+	if chunks[3].Choices[0].FinishReason != core.FinishReasonStop {
+		t.Errorf("final finish_reason = %q, want stop", chunks[3].Choices[0].FinishReason)
 	}
 }
 
@@ -535,6 +516,59 @@ func TestOpenAIProvider_Embed_ValidEncodingFormats(t *testing.T) {
 			})
 			if err != nil {
 				t.Errorf("Embed() with EncodingFormat=%q: unexpected error: %v", format, err)
+			}
+		})
+	}
+}
+
+// TestOpenAIProvider_DiscoverModels_WireEndpoint verifies DiscoverModels hits
+// <base>/v1/models and, critically, dedups a base URL that already ends in /v1
+// (so it never issues /v1/v1/models). Bearer auth and the parsed model list are
+// asserted too.
+func TestOpenAIProvider_DiscoverModels_WireEndpoint(t *testing.T) {
+	const wantPath = "/v1/models"
+
+	cases := []struct {
+		name       string
+		baseSuffix string
+	}{
+		{"default base resolves to /v1/models", ""},
+		{"trailing /v1 base is not doubled", "/v1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotPath, gotAuth string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				gotAuth = r.Header.Get("Authorization")
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"object":"list","data":[{"id":"gpt-4o","object":"model","owned_by":"openai"},{"id":"gpt-4o-mini","object":"model"}]}`)
+			}))
+			defer srv.Close()
+
+			p, err := New("sk-test-key", srv.URL+tc.baseSuffix)
+			if err != nil {
+				t.Fatalf("New() error: %v", err)
+			}
+			models, err := p.DiscoverModels(context.Background())
+			if err != nil {
+				t.Fatalf("DiscoverModels() error: %v", err)
+			}
+			if gotPath != wantPath {
+				t.Errorf("request path = %q, want %q", gotPath, wantPath)
+			}
+			if gotAuth != "Bearer sk-test-key" {
+				t.Errorf("Authorization = %q, want Bearer sk-test-key", gotAuth)
+			}
+			if len(models) != 2 {
+				t.Fatalf("models len = %d, want 2", len(models))
+			}
+			if models[0].ID != "gpt-4o" || models[0].OwnedBy != "openai" {
+				t.Errorf("models[0] = %+v, want gpt-4o owned_by openai", models[0])
+			}
+			// owned_by falls back to the provider name when absent.
+			if models[1].OwnedBy != "openai" {
+				t.Errorf("models[1] owned_by = %q, want openai fallback", models[1].OwnedBy)
 			}
 		})
 	}

@@ -4,14 +4,27 @@ package gemini
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"slices"
 	"strings"
 
 	providerhttp "github.com/ferro-labs/ai-gateway/internal/httpclient"
 	"github.com/ferro-labs/ai-gateway/providers/core"
 )
+
+// sanitizeRequestErr strips the request URL from *url.Error as defense-in-depth
+// so no request URL or query params reach logs or client-facing error bodies.
+func sanitizeRequestErr(err error) error {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return fmt.Errorf("%s %s: %w", urlErr.Op, "[redacted]", urlErr.Err)
+	}
+	return err
+}
 
 // Name is the canonical provider identifier.
 const Name = "gemini"
@@ -28,16 +41,20 @@ type Provider struct {
 
 // Compile-time interface assertions.
 var (
-	_ core.Provider          = (*Provider)(nil)
-	_ core.StreamProvider    = (*Provider)(nil)
-	_ core.EmbeddingProvider = (*Provider)(nil)
-	_ core.ProxiableProvider = (*Provider)(nil)
+	_ core.Provider              = (*Provider)(nil)
+	_ core.StreamProvider        = (*Provider)(nil)
+	_ core.EmbeddingProvider     = (*Provider)(nil)
+	_ core.ImageProvider         = (*Provider)(nil)
+	_ core.ProxiableProvider     = (*Provider)(nil)
+	_ core.NonOpenAIWireProvider = (*Provider)(nil)
 )
 
 // New creates a new Google Gemini provider.
 func New(apiKey, baseURL string) (*Provider, error) {
 	if baseURL == "" {
 		baseURL = defaultBaseURL
+	} else if err := core.ValidateBaseURL(Name, baseURL); err != nil {
+		return nil, err
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
 	return &Provider{
@@ -54,9 +71,16 @@ func (p *Provider) Name() string { return p.name }
 // BaseURL implements core.ProxiableProvider.
 func (p *Provider) BaseURL() string { return p.baseURL }
 
+// NonOpenAIWire marks Gemini as ineligible for transparent OpenAI-wire proxy
+// pass-through: its upstream is the Gemini generateContent API, not
+// OpenAI-shaped. It remains fully usable via its native translated endpoints.
+// See core.NonOpenAIWireProvider.
+func (*Provider) NonOpenAIWire() {}
+
 // AuthHeaders implements core.ProxiableProvider.
-// Gemini authenticates via the ?key= query parameter (added by the proxy
-// director), so no Authorization header is required here.
+// Gemini authenticates via the x-goog-api-key header, applied to native calls
+// in doJSONRequest and injected on the proxy path by the director. The key is
+// never placed in the request URL, so it cannot leak into spans or access logs.
 func (p *Provider) AuthHeaders() map[string]string {
 	return map[string]string{"x-goog-api-key": p.apiKey}
 }
@@ -64,20 +88,25 @@ func (p *Provider) AuthHeaders() map[string]string {
 // SupportedModels returns the static list of known Gemini models.
 func (p *Provider) SupportedModels() []string {
 	return []string{
-		"gemini-2.0-flash",
-		"gemini-2.0-flash-lite",
-		"gemini-1.5-pro",
-		"gemini-1.5-flash",
+		// Current GA tier
+		"gemini-2.5-pro",
+		"gemini-2.5-flash",
+		"gemini-2.5-flash-lite",
+		// Embeddings
 		"gemini-embedding-001",
 		"text-embedding-004",
 		"embedding-001",
+		// Image generation (Imagen)
+		"imagen-4.0-generate-001",
+		"imagen-4.0-ultra-generate-001",
+		"imagen-4.0-fast-generate-001",
 	}
 }
 
-// SupportsModel returns true if the model is a known Gemini chat or embedding model.
+// SupportsModel returns true if the model is a known Gemini chat, embedding, or image model.
 func (p *Provider) SupportsModel(model string) bool {
 	model = strings.TrimPrefix(model, "models/")
-	if strings.HasPrefix(model, "gemini-") {
+	if strings.HasPrefix(model, "gemini-") || strings.HasPrefix(model, "imagen-") {
 		return true
 	}
 	switch model {
@@ -95,8 +124,24 @@ func (p *Provider) Models() []core.ModelInfo {
 
 type geminiPart struct {
 	Text             string                  `json:"text,omitempty"`
+	InlineData       *geminiInlineData       `json:"inlineData,omitempty"`
+	FileData         *geminiFileData         `json:"fileData,omitempty"`
 	FunctionCall     *geminiFunctionCall     `json:"functionCall,omitempty"`
 	FunctionResponse *geminiFunctionResponse `json:"functionResponse,omitempty"`
+}
+
+// geminiInlineData carries an inline base64-encoded image, mapped from an OpenAI
+// image_url data URI.
+type geminiInlineData struct {
+	MimeType string `json:"mimeType"`
+	Data     string `json:"data"`
+}
+
+// geminiFileData references image bytes by URI, mapped from a remote (non-data)
+// image_url.
+type geminiFileData struct {
+	MimeType string `json:"mimeType,omitempty"`
+	FileURI  string `json:"fileUri"`
 }
 
 type geminiFunctionCall struct {
@@ -164,7 +209,19 @@ type geminiFunctionCallingConfig struct {
 	AllowedFunctionNames []string `json:"allowedFunctionNames,omitempty"`
 }
 
+// geminiUsageMetadata is Gemini's token accounting, including the cached-content
+// and thinking (reasoning) token counts documented on the generateContent
+// response.
+type geminiUsageMetadata struct {
+	PromptTokenCount        int `json:"promptTokenCount"`
+	CandidatesTokenCount    int `json:"candidatesTokenCount"`
+	TotalTokenCount         int `json:"totalTokenCount"`
+	CachedContentTokenCount int `json:"cachedContentTokenCount"`
+	ThoughtsTokenCount      int `json:"thoughtsTokenCount"`
+}
+
 type geminiResponse struct {
+	ResponseID string `json:"responseId"`
 	Candidates []struct {
 		Content struct {
 			Parts []geminiPart `json:"parts"`
@@ -172,44 +229,7 @@ type geminiResponse struct {
 		} `json:"content"`
 		FinishReason string `json:"finishReason"`
 	} `json:"candidates"`
-	UsageMetadata struct {
-		PromptTokenCount     int `json:"promptTokenCount"`
-		CandidatesTokenCount int `json:"candidatesTokenCount"`
-		TotalTokenCount      int `json:"totalTokenCount"`
-	} `json:"usageMetadata"`
-}
-
-type geminiErrorDetail struct {
-	Message string `json:"message"`
-	Status  string `json:"status"`
-}
-
-type geminiErrorResponse struct {
-	Error geminiErrorDetail `json:"error"`
-}
-
-type geminiEmbeddingContent struct {
-	Parts []geminiPart `json:"parts"`
-}
-
-type geminiBatchEmbedContentRequest struct {
-	Model                string                 `json:"model"`
-	Content              geminiEmbeddingContent `json:"content"`
-	OutputDimensionality *int                   `json:"outputDimensionality,omitempty"`
-}
-
-type geminiBatchEmbedRequest struct {
-	Requests []geminiBatchEmbedContentRequest `json:"requests"`
-}
-
-type geminiBatchEmbedResponse struct {
-	Embeddings []struct {
-		Values []float64 `json:"values"`
-	} `json:"embeddings"`
-	UsageMetadata struct {
-		PromptTokenCount int `json:"promptTokenCount"`
-		TotalTokenCount  int `json:"totalTokenCount"`
-	} `json:"usageMetadata"`
+	UsageMetadata geminiUsageMetadata `json:"usageMetadata"`
 }
 
 type geminiStreamResponse struct {
@@ -220,11 +240,7 @@ type geminiStreamResponse struct {
 		} `json:"content"`
 		FinishReason string `json:"finishReason,omitempty"`
 	} `json:"candidates"`
-	UsageMetadata struct {
-		PromptTokenCount     int `json:"promptTokenCount"`
-		CandidatesTokenCount int `json:"candidatesTokenCount"`
-		TotalTokenCount      int `json:"totalTokenCount"`
-	} `json:"usageMetadata"`
+	UsageMetadata geminiUsageMetadata `json:"usageMetadata"`
 }
 
 // convertToGemini converts gateway Messages to Gemini contents format. System
@@ -287,7 +303,18 @@ func geminiParts(msg core.Message, toolCallNames map[string]string) []geminiPart
 		}}}
 	}
 	var parts []geminiPart
-	if msg.Content != "" {
+	if len(msg.ContentParts) > 0 {
+		for _, part := range msg.ContentParts {
+			switch part.Type {
+			case core.ContentTypeText:
+				parts = append(parts, geminiPart{Text: part.Text})
+			case "image_url":
+				if part.ImageURL != nil {
+					parts = append(parts, geminiImagePart(part.ImageURL.URL))
+				}
+			}
+		}
+	} else if msg.Content != "" {
 		parts = append(parts, geminiPart{Text: msg.Content})
 	}
 	for _, tc := range msg.ToolCalls {
@@ -307,25 +334,45 @@ func geminiParts(msg core.Message, toolCallNames map[string]string) []geminiPart
 	return parts
 }
 
-// mapFinishReason maps Gemini finish reasons to OpenAI-style reasons.
-func mapFinishReason(reason string) string {
-	switch reason {
-	case "STOP":
-		return core.FinishReasonStop
-	case "MAX_TOKENS":
-		return core.FinishReasonLength
-	case "SAFETY":
-		return core.FinishReasonContentFilter
-	default:
-		return reason
+// geminiImagePart maps an OpenAI image_url to a Gemini part: an inline base64
+// image for a data URI, or a fileData URI reference for a remote image. This
+// keeps multimodal image content in the request instead of dropping it.
+func geminiImagePart(imageURL string) geminiPart {
+	if mimeType, data, ok := parseImageDataURI(imageURL); ok {
+		return geminiPart{InlineData: &geminiInlineData{MimeType: mimeType, Data: data}}
 	}
+	return geminiPart{FileData: &geminiFileData{FileURI: imageURL}}
 }
 
+// parseImageDataURI splits a "data:<mime>[;param]...;base64,<data>" URI into its
+// MIME type and base64 payload. ok is false for a non-base64 data URI or a
+// remote URL. The "base64" token may follow other parameters (e.g.
+// "data:image/png;charset=utf-8;base64,...").
+func parseImageDataURI(uri string) (mimeType, data string, ok bool) {
+	const prefix = "data:"
+	if !strings.HasPrefix(uri, prefix) {
+		return "", "", false
+	}
+	meta, payload, found := strings.Cut(uri[len(prefix):], ",")
+	if !found {
+		return "", "", false
+	}
+	params := strings.Split(meta, ";")
+	if slices.Contains(params[1:], "base64") {
+		return params[0], payload, true
+	}
+	return "", "", false
+}
+
+// geminiFinishReason maps a Gemini candidate finishReason to the canonical
+// OpenAI vocabulary. Gemini has no dedicated tool-call reason, so tool calls are
+// inferred from the decoded parts; everything else routes through the shared
+// normalizer (which covers Gemini's RECITATION/SAFETY-family reasons).
 func geminiFinishReason(reason string, toolCalls []core.ToolCall) string {
 	if len(toolCalls) > 0 {
 		return core.FinishReasonToolCalls
 	}
-	return mapFinishReason(reason)
+	return core.NormalizeFinishReason(reason)
 }
 
 func buildRequest(req core.Request) geminiRequest {
@@ -462,125 +509,79 @@ func geminiToolConfigFor(choice any) *geminiToolConfig {
 	}
 }
 
-func embeddingInputs(input any) ([]string, error) {
-	switch v := input.(type) {
-	case string:
-		return []string{v}, nil
-	case []string:
-		if len(v) == 0 {
-			return nil, fmt.Errorf("embed: Input must not be an empty array")
-		}
-		return v, nil
-	case []any:
-		if len(v) == 0 {
-			return nil, fmt.Errorf("embed: Input must not be an empty array")
-		}
-		texts := make([]string, 0, len(v))
-		for i, item := range v {
-			s, ok := item.(string)
-			if !ok {
-				return nil, fmt.Errorf("embed: Input[%d] is %T, want string", i, item)
-			}
-			texts = append(texts, s)
-		}
-		return texts, nil
-	case nil:
-		return nil, fmt.Errorf("embed: Input must not be nil")
-	default:
-		return nil, fmt.Errorf("embed: unsupported Input type %T; want string or []string", input)
-	}
-}
-
-func geminiModelResource(model string) string {
-	model = strings.TrimPrefix(model, "models/")
-	return "models/" + model
-}
-
-// Embed sends a text embedding request to Gemini's batchEmbedContents endpoint.
-func (p *Provider) Embed(ctx context.Context, req core.EmbeddingRequest) (*core.EmbeddingResponse, error) {
-	if req.EncodingFormat != "" && req.EncodingFormat != "float" {
-		return nil, fmt.Errorf("embed: unsupported encoding_format %q; valid value is \"float\"", req.EncodingFormat)
-	}
-	texts, err := embeddingInputs(req.Input)
+// doJSONRequest marshals body to JSON and performs an HTTP request against the
+// Gemini API. It returns the live response plus a release func the caller must
+// defer to return the pooled request buffer. The label is woven into error
+// messages so callers can distinguish operations.
+func (p *Provider) doJSONRequest(ctx context.Context, method, reqURL, label string, body any) (*http.Response, func(), error) {
+	bodyReader, _, release, err := core.JSONBodyReader(body)
 	if err != nil {
-		return nil, err
+		return nil, nil, fmt.Errorf("failed to marshal %srequest: %w", label, err)
 	}
-
-	model := strings.TrimPrefix(req.Model, "models/")
-	modelResource := geminiModelResource(req.Model)
-	geminiReq := geminiBatchEmbedRequest{
-		Requests: make([]geminiBatchEmbedContentRequest, 0, len(texts)),
-	}
-	for _, text := range texts {
-		geminiReq.Requests = append(geminiReq.Requests, geminiBatchEmbedContentRequest{
-			Model:                modelResource,
-			Content:              geminiEmbeddingContent{Parts: []geminiPart{{Text: text}}},
-			OutputDimensionality: req.Dimensions,
-		})
-	}
-
-	bodyReader, _, release, err := core.JSONBodyReader(geminiReq)
+	httpReq, err := http.NewRequestWithContext(ctx, method, reqURL, bodyReader)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal embed request: %w", err)
-	}
-	defer release()
-
-	url := fmt.Sprintf("%s/v1beta/models/%s:batchEmbedContents?key=%s", p.baseURL, model, p.apiKey)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bodyReader)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create embed request: %w", err)
+		release()
+		return nil, nil, fmt.Errorf("failed to create %srequest: %w", label, err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	for k, v := range p.AuthHeaders() {
+		httpReq.Header.Set(k, v)
+	}
 
 	httpResp, err := p.httpClient.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("embed request failed: %w", err)
+		release()
+		return nil, nil, fmt.Errorf("%srequest failed: %w", label, sanitizeRequestErr(err))
 	}
-	defer func() { _ = httpResp.Body.Close() }()
+	return httpResp, release, nil
+}
 
-	respBody, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read embed response: %w", err)
-	}
-
-	if httpResp.StatusCode != http.StatusOK {
-		var errResp geminiErrorResponse
-		if json.Unmarshal(respBody, &errResp) == nil && errResp.Error.Message != "" {
-			return nil, fmt.Errorf("gemini embed API error (%d): %s", httpResp.StatusCode, errResp.Error.Message)
+// parseCandidateParts accumulates text and tool calls from one candidate's
+// parts. When withIndex is set, each tool call carries its position index
+// (required for streaming deltas). candidateIndex seeds synthetic tool-call IDs
+// when the provider omits them. toolCallCounter, when non-nil, tracks the
+// running tool-call count for this candidate across the whole stream: Gemini
+// delivers parallel tool calls as separate, cumulative SSE chunks, so a fresh
+// per-chunk counter would restart at 0 and misalign indices/IDs across chunks.
+// Pass nil for single-shot (non-streaming) parsing, where a fresh count is
+// correct.
+func parseCandidateParts(parts []geminiPart, candidateIndex int, withIndex bool, toolCallCounter *int) (string, []core.ToolCall) {
+	var text string
+	var toolCalls []core.ToolCall
+	for _, part := range parts {
+		text += part.Text
+		if part.FunctionCall != nil {
+			args := string(part.FunctionCall.Args)
+			if args == "" {
+				args = "{}"
+			}
+			n := len(toolCalls)
+			if toolCallCounter != nil {
+				n = *toolCallCounter
+			}
+			id := part.FunctionCall.ID
+			if id == "" {
+				id = fmt.Sprintf("call_%d_%d", candidateIndex, n)
+			}
+			tc := core.ToolCall{
+				ID:   id,
+				Type: "function",
+				Function: core.FunctionCall{
+					Name:      part.FunctionCall.Name,
+					Arguments: args,
+				},
+			}
+			if withIndex {
+				idx := n
+				tc.Index = &idx
+			}
+			if toolCallCounter != nil {
+				*toolCallCounter++
+			}
+			toolCalls = append(toolCalls, tc)
 		}
-		return nil, fmt.Errorf("gemini embed API error (%d): %s", httpResp.StatusCode, string(respBody))
 	}
-
-	var geminiResp geminiBatchEmbedResponse
-	if err := json.Unmarshal(respBody, &geminiResp); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal embed response: %w", err)
-	}
-	if len(geminiResp.Embeddings) != len(texts) {
-		return nil, fmt.Errorf("gemini embed API returned %d embeddings for %d inputs", len(geminiResp.Embeddings), len(texts))
-	}
-
-	data := make([]core.Embedding, len(geminiResp.Embeddings))
-	for i, embedding := range geminiResp.Embeddings {
-		data[i] = core.Embedding{
-			Object:    "embedding",
-			Embedding: embedding.Values,
-			Index:     i,
-		}
-	}
-
-	totalTokens := geminiResp.UsageMetadata.TotalTokenCount
-	if totalTokens == 0 {
-		totalTokens = geminiResp.UsageMetadata.PromptTokenCount
-	}
-	return &core.EmbeddingResponse{
-		Object: "list",
-		Data:   data,
-		Model:  req.Model,
-		Usage: core.EmbeddingUsage{
-			PromptTokens: geminiResp.UsageMetadata.PromptTokenCount,
-			TotalTokens:  totalTokens,
-		},
-	}, nil
+	return text, toolCalls
 }
 
 // Complete sends a chat completion request to Gemini.
@@ -589,23 +590,12 @@ func (p *Provider) Complete(ctx context.Context, req core.Request) (*core.Respon
 
 	geminiReq := buildRequest(req)
 
-	bodyReader, _, release, err := core.JSONBodyReader(geminiReq)
+	url := fmt.Sprintf("%s/v1beta/models/%s:generateContent", p.baseURL, url.PathEscape(req.Model))
+	httpResp, release, err := p.doJSONRequest(ctx, http.MethodPost, url, "", geminiReq)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
+		return nil, err
 	}
 	defer release()
-
-	url := fmt.Sprintf("%s/v1beta/models/%s:generateContent?key=%s", p.baseURL, req.Model, p.apiKey)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bodyReader)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	httpResp, err := p.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
-	}
 	defer func() { _ = httpResp.Body.Close() }()
 
 	respBody, err := io.ReadAll(httpResp.Body)
@@ -614,11 +604,7 @@ func (p *Provider) Complete(ctx context.Context, req core.Request) (*core.Respon
 	}
 
 	if httpResp.StatusCode != http.StatusOK {
-		var errResp geminiErrorResponse
-		if json.Unmarshal(respBody, &errResp) == nil && errResp.Error.Message != "" {
-			return nil, fmt.Errorf("gemini API error (%d): %s", httpResp.StatusCode, errResp.Error.Message)
-		}
-		return nil, fmt.Errorf("gemini API error (%d): %s", httpResp.StatusCode, string(respBody))
+		return nil, core.APIError("gemini", httpResp.StatusCode, respBody)
 	}
 
 	var geminiResp geminiResponse
@@ -628,29 +614,7 @@ func (p *Provider) Complete(ctx context.Context, req core.Request) (*core.Respon
 
 	var choices []core.Choice
 	for i, candidate := range geminiResp.Candidates {
-		var text string
-		var toolCalls []core.ToolCall
-		for _, part := range candidate.Content.Parts {
-			text += part.Text
-			if part.FunctionCall != nil {
-				args := string(part.FunctionCall.Args)
-				if args == "" {
-					args = "{}"
-				}
-				id := part.FunctionCall.ID
-				if id == "" {
-					id = fmt.Sprintf("call_%d_%d", i, len(toolCalls))
-				}
-				toolCalls = append(toolCalls, core.ToolCall{
-					ID:   id,
-					Type: "function",
-					Function: core.FunctionCall{
-						Name:      part.FunctionCall.Name,
-						Arguments: args,
-					},
-				})
-			}
-		}
+		text, toolCalls := parseCandidateParts(candidate.Content.Parts, i, false, nil)
 		choices = append(choices, core.Choice{
 			Index: i,
 			Message: core.Message{
@@ -662,14 +626,21 @@ func (p *Provider) Complete(ctx context.Context, req core.Request) (*core.Respon
 		})
 	}
 
+	responseID := geminiResp.ResponseID
+	if responseID == "" {
+		responseID = req.Model
+	}
 	return &core.Response{
-		ID:      req.Model,
-		Model:   req.Model,
-		Choices: choices,
+		ID:       responseID,
+		Model:    req.Model,
+		Provider: p.name,
+		Choices:  choices,
 		Usage: core.Usage{
 			PromptTokens:     geminiResp.UsageMetadata.PromptTokenCount,
 			CompletionTokens: geminiResp.UsageMetadata.CandidatesTokenCount,
 			TotalTokens:      geminiResp.UsageMetadata.TotalTokenCount,
+			ReasoningTokens:  geminiResp.UsageMetadata.ThoughtsTokenCount,
+			CacheReadTokens:  geminiResp.UsageMetadata.CachedContentTokenCount,
 		},
 	}, nil
 }
@@ -680,32 +651,17 @@ func (p *Provider) CompleteStream(ctx context.Context, req core.Request) (<-chan
 
 	geminiReq := buildRequest(req)
 
-	bodyReader, _, release, err := core.JSONBodyReader(geminiReq)
+	url := fmt.Sprintf("%s/v1beta/models/%s:streamGenerateContent?alt=sse", p.baseURL, url.PathEscape(req.Model))
+	httpResp, release, err := p.doJSONRequest(ctx, http.MethodPost, url, "", geminiReq)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
+		return nil, err
 	}
 	defer release()
-
-	url := fmt.Sprintf("%s/v1beta/models/%s:streamGenerateContent?key=%s&alt=sse", p.baseURL, req.Model, p.apiKey)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bodyReader)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	httpResp, err := p.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
-	}
 
 	if httpResp.StatusCode != http.StatusOK {
 		defer func() { _ = httpResp.Body.Close() }()
 		respBody, _ := io.ReadAll(httpResp.Body)
-		var errResp geminiErrorResponse
-		if json.Unmarshal(respBody, &errResp) == nil && errResp.Error.Message != "" {
-			return nil, fmt.Errorf("gemini API error (%d): %s", httpResp.StatusCode, errResp.Error.Message)
-		}
-		return nil, fmt.Errorf("gemini API error (%d): %s", httpResp.StatusCode, string(respBody))
+		return nil, core.APIError("gemini", httpResp.StatusCode, respBody)
 	}
 
 	ch := make(chan core.StreamChunk)
@@ -713,13 +669,12 @@ func (p *Provider) CompleteStream(ctx context.Context, req core.Request) (<-chan
 		defer close(ch)
 		defer func() { _ = httpResp.Body.Close() }()
 
-		scanner := core.NewSSEScanner(httpResp.Body)
-		for scanner.Scan() {
-			line := scanner.Text()
-			if !strings.HasPrefix(line, "data: ") {
-				continue
-			}
-			data := strings.TrimPrefix(line, "data: ")
+		lines, scanErr := core.SSEDataLines(httpResp.Body)
+		// toolCallCounters tracks each candidate's running tool-call count
+		// across the entire stream, since Gemini can split parallel tool
+		// calls across multiple SSE chunks.
+		toolCallCounters := make(map[int]int)
+		for data := range lines {
 
 			var chunk geminiStreamResponse
 			if json.Unmarshal([]byte(data), &chunk) != nil {
@@ -731,32 +686,9 @@ func (p *Provider) CompleteStream(ctx context.Context, req core.Request) (<-chan
 				Model: req.Model,
 			}
 			for i, candidate := range chunk.Candidates {
-				var text string
-				var toolCalls []core.ToolCall
-				for _, part := range candidate.Content.Parts {
-					text += part.Text
-					if part.FunctionCall != nil {
-						toolCallIndex := len(toolCalls)
-						toolCallIndexPtr := toolCallIndex
-						args := string(part.FunctionCall.Args)
-						if args == "" {
-							args = "{}"
-						}
-						id := part.FunctionCall.ID
-						if id == "" {
-							id = fmt.Sprintf("call_%d_%d", i, len(toolCalls))
-						}
-						toolCalls = append(toolCalls, core.ToolCall{
-							Index: &toolCallIndexPtr,
-							ID:    id,
-							Type:  "function",
-							Function: core.FunctionCall{
-								Name:      part.FunctionCall.Name,
-								Arguments: args,
-							},
-						})
-					}
-				}
+				counter := toolCallCounters[i]
+				text, toolCalls := parseCandidateParts(candidate.Content.Parts, i, true, &counter)
+				toolCallCounters[i] = counter
 				sc.Choices = append(sc.Choices, core.StreamChoice{
 					Index: i,
 					Delta: core.MessageDelta{
@@ -767,9 +699,19 @@ func (p *Provider) CompleteStream(ctx context.Context, req core.Request) (<-chan
 					FinishReason: geminiFinishReason(candidate.FinishReason, toolCalls),
 				})
 			}
+			// Gemini reports usage on the final streamed chunk.
+			if chunk.UsageMetadata.TotalTokenCount > 0 {
+				sc.Usage = &core.Usage{
+					PromptTokens:     chunk.UsageMetadata.PromptTokenCount,
+					CompletionTokens: chunk.UsageMetadata.CandidatesTokenCount,
+					TotalTokens:      chunk.UsageMetadata.TotalTokenCount,
+					ReasoningTokens:  chunk.UsageMetadata.ThoughtsTokenCount,
+					CacheReadTokens:  chunk.UsageMetadata.CachedContentTokenCount,
+				}
+			}
 			ch <- sc
 		}
-		if err := scanner.Err(); err != nil {
+		if err := scanErr(); err != nil {
 			ch <- core.StreamChunk{Error: err}
 		}
 	}()

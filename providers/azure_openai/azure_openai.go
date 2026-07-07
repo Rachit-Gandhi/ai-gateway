@@ -3,15 +3,14 @@ package azureopenai
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	providerhttp "github.com/ferro-labs/ai-gateway/internal/httpclient"
-	"github.com/ferro-labs/ai-gateway/internal/openaicompat"
 	"github.com/ferro-labs/ai-gateway/providers/core"
+	"github.com/ferro-labs/ai-gateway/providers/internal/openaicompat"
 )
 
 // Name is the canonical provider identifier.
@@ -31,13 +30,20 @@ type Provider struct {
 
 // Compile-time interface assertions.
 var (
-	_ core.Provider          = (*Provider)(nil)
-	_ core.StreamProvider    = (*Provider)(nil)
-	_ core.ProxiableProvider = (*Provider)(nil)
+	_ core.Provider              = (*Provider)(nil)
+	_ core.StreamProvider        = (*Provider)(nil)
+	_ core.ProxiableProvider     = (*Provider)(nil)
+	_ core.NonOpenAIWireProvider = (*Provider)(nil)
+	_ core.EmbeddingProvider     = (*Provider)(nil)
+	_ core.ImageProvider         = (*Provider)(nil)
 )
 
 // New creates a new Azure OpenAI provider.
 func New(apiKey, baseURL, deploymentName, apiVersion string) (*Provider, error) {
+	baseURL = strings.TrimSpace(baseURL)
+	if err := core.ValidateBaseURL(Name, baseURL); err != nil {
+		return nil, err
+	}
 	baseURL = strings.TrimRight(baseURL, "/")
 	if apiVersion == "" {
 		apiVersion = defaultAPIVersion
@@ -60,6 +66,13 @@ func (p *Provider) BaseURL() string { return p.baseURL }
 
 // APIVersion returns the configured Azure API version.
 func (p *Provider) APIVersion() string { return p.apiVersion }
+
+// NonOpenAIWire marks Azure OpenAI as ineligible for transparent OpenAI-wire
+// proxy pass-through: its upstream uses Azure deployment paths and an
+// api-version query parameter, so an OpenAI-shaped request is not directly
+// forwardable. It remains fully usable via its native translated endpoints. See
+// core.NonOpenAIWireProvider.
+func (*Provider) NonOpenAIWire() {}
 
 // AuthHeaders implements core.ProxiableProvider.
 func (p *Provider) AuthHeaders() map[string]string {
@@ -90,20 +103,39 @@ func (p *Provider) endpoint() string {
 		p.baseURL, p.deploymentName, p.apiVersion)
 }
 
-type azureOpenAIResponse struct {
-	ID      string        `json:"id"`
-	Model   string        `json:"model"`
-	Choices []core.Choice `json:"choices"`
-	Usage   core.Usage    `json:"usage"`
+// opEndpoint builds an Azure OpenAI URL for an arbitrary deployment+operation,
+// e.g. op "embeddings" or "images/generations".
+func (p *Provider) opEndpoint(deployment, op string) string {
+	return fmt.Sprintf("%s/openai/deployments/%s/%s?api-version=%s",
+		p.baseURL, url.PathEscape(deployment), op, p.apiVersion)
 }
 
-type azureOpenAIErrorDetail struct {
-	Message string `json:"message"`
-	Type    string `json:"type"`
+// deploymentFor selects the deployment to target for a request. Azure routes
+// by deployment name in the URL (not by a body "model" field), so callers may
+// override the configured deployment per request by setting req.Model.
+//
+// NOTE: Complete/CompleteStream intentionally keep using p.deploymentName
+// (via endpoint()) rather than deploymentFor — the chat path is pinned to the
+// single configured chat deployment, whereas Embed/GenerateImage allow the
+// caller to target a different embedding/image deployment by model. This
+// asymmetry is deliberate.
+func (p *Provider) deploymentFor(model string) string {
+	if model != "" {
+		return model
+	}
+	return p.deploymentName
 }
 
-type azureOpenAIErrorResponse struct {
-	Error azureOpenAIErrorDetail `json:"error"`
+// chatParams builds the shared OpenAI-compatible request parameters for the
+// configured chat deployment.
+func (p *Provider) chatParams() openaicompat.ChatParams {
+	return openaicompat.ChatParams{
+		HTTPClient: p.httpClient,
+		URL:        p.endpoint(),
+		Headers:    map[string]string{"api-key": p.apiKey, "Content-Type": "application/json"},
+		Provider:   p.name,
+		Label:      "azure openai",
+	}
 }
 
 // Complete sends a chat completion request to Azure OpenAI.
@@ -111,81 +143,11 @@ func (p *Provider) Complete(ctx context.Context, req core.Request) (*core.Respon
 	// Azure o-series reasoning deployments reject max_tokens; keep only the
 	// modern field (the gateway seam leaves both populated).
 	req.PreferCompletionTokens()
-	bodyReader, _, release, err := openaicompat.BuildBody(req, false)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
-	}
-	defer release()
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.endpoint(), bodyReader)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	httpReq.Header.Set("api-key", p.apiKey)
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	httpResp, err := p.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
-	}
-	defer func() { _ = httpResp.Body.Close() }()
-
-	respBody, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	if httpResp.StatusCode != http.StatusOK {
-		var errResp azureOpenAIErrorResponse
-		if json.Unmarshal(respBody, &errResp) == nil && errResp.Error.Message != "" {
-			return nil, fmt.Errorf("azure openai API error (%d): %s", httpResp.StatusCode, errResp.Error.Message)
-		}
-		return nil, fmt.Errorf("azure openai API error (%d): %s", httpResp.StatusCode, string(respBody))
-	}
-
-	var azureResp azureOpenAIResponse
-	if err := json.Unmarshal(respBody, &azureResp); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
-	}
-
-	return &core.Response{
-		ID:      azureResp.ID,
-		Model:   azureResp.Model,
-		Choices: azureResp.Choices,
-		Usage:   azureResp.Usage,
-	}, nil
+	return openaicompat.PostChat(ctx, p.chatParams(), req)
 }
 
 // CompleteStream sends a streaming chat completion request to Azure OpenAI.
 func (p *Provider) CompleteStream(ctx context.Context, req core.Request) (<-chan core.StreamChunk, error) {
 	req.PreferCompletionTokens()
-	bodyReader, _, release, err := openaicompat.BuildBody(req, true)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
-	}
-	defer release()
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.endpoint(), bodyReader)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-	httpReq.Header.Set("api-key", p.apiKey)
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	httpResp, err := p.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
-	}
-
-	if httpResp.StatusCode != http.StatusOK {
-		defer func() { _ = httpResp.Body.Close() }()
-		respBody, _ := io.ReadAll(httpResp.Body)
-		var errResp azureOpenAIErrorResponse
-		if json.Unmarshal(respBody, &errResp) == nil && errResp.Error.Message != "" {
-			return nil, fmt.Errorf("azure openai API error (%d): %s", httpResp.StatusCode, errResp.Error.Message)
-		}
-		return nil, fmt.Errorf("azure openai API error (%d): %s", httpResp.StatusCode, string(respBody))
-	}
-
-	return openaicompat.StreamSSE(httpResp.Body), nil
+	return openaicompat.PostStream(ctx, p.chatParams(), req)
 }

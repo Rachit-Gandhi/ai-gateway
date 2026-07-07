@@ -2,7 +2,9 @@ package bootstrap
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -12,26 +14,80 @@ import (
 	"time"
 
 	aigateway "github.com/ferro-labs/ai-gateway"
+	"github.com/ferro-labs/ai-gateway/internal/admin"
 	"github.com/ferro-labs/ai-gateway/internal/httpserver"
 	"github.com/ferro-labs/ai-gateway/internal/logging"
 	gwotel "github.com/ferro-labs/ai-gateway/internal/otel"
 	"github.com/ferro-labs/ai-gateway/internal/ratelimit"
+	"github.com/ferro-labs/ai-gateway/internal/requestlog"
 	"github.com/ferro-labs/ai-gateway/internal/version"
 	"github.com/ferro-labs/ai-gateway/providers"
 	bedrockpkg "github.com/ferro-labs/ai-gateway/providers/bedrock"
 )
+
+// CheckProductionSafety returns an error if ALLOW_UNAUTHENTICATED_PROXY=true is
+// combined with GATEWAY_ENV=production.  Allowing unauthenticated proxy access
+// in a production environment silently removes all /v1/* data-plane auth, so
+// the gateway refuses to start rather than serve in an insecure state.
+//
+// Outside of production (GATEWAY_ENV unset or any value other than
+// "production"), the flag is honoured and a warning is emitted at startup
+// (existing dev-mode behaviour is preserved).
+func CheckProductionSafety() error {
+	allowUnauth := strings.EqualFold(strings.TrimSpace(os.Getenv("ALLOW_UNAUTHENTICATED_PROXY")), "true")
+	isProduction := strings.EqualFold(strings.TrimSpace(os.Getenv("GATEWAY_ENV")), "production")
+
+	if allowUnauth && isProduction {
+		return fmt.Errorf(
+			"ALLOW_UNAUTHENTICATED_PROXY=true is not allowed when GATEWAY_ENV=production: " +
+				"all /v1/* data-plane endpoints would be unauthenticated; " +
+				"unset ALLOW_UNAUTHENTICATED_PROXY or change GATEWAY_ENV to a non-production value",
+		)
+	}
+	return nil
+}
+
+// defaultListenAddr is the address the HTTP server listens on when PORT is unset.
+const defaultListenAddr = ":8080"
+
+// shutdownGracePeriod bounds how long graceful shutdown waits for in-flight
+// HTTP connections to drain before returning.
+const shutdownGracePeriod = 15 * time.Second
 
 // Serve runs the full gateway server startup sequence and blocks until the
 // server shuts down.  It exits the process on fatal errors.
 func Serve() {
 	logging.Setup(os.Getenv("LOG_LEVEL"), os.Getenv("LOG_FORMAT"))
 
+	if err := CheckProductionSafety(); err != nil {
+		logging.Logger.Error("startup blocked: unsafe configuration", "error", err)
+		os.Exit(1)
+	}
+
+	gw, srv, cfgManager, keyStore, logReader, otelShutdown := buildServer()
+	listenErr := runUntilShutdown(gw, srv)
+	gracefulShutdown(srv, gw, cfgManager, keyStore, logReader, otelShutdown, listenErr)
+}
+
+// buildServer runs the startup sequence: it loads configuration, registers
+// providers, initializes observability and the persistence stores, constructs
+// the router and HTTP server, prints the startup banner, and logs readiness.
+// It exits the process on any fatal initialization error and returns the
+// long-lived components needed to run and later shut down the server.
+func buildServer() (
+	*aigateway.Gateway,
+	*http.Server,
+	admin.ConfigManager,
+	admin.Store,
+	requestlog.Reader,
+	gwotel.ShutdownFunc,
+) {
 	cfg := LoadConfig()
 	registry := RegisterProviders()
 	masterKey := ResolveMasterKey()
 
 	if strings.EqualFold(strings.TrimSpace(os.Getenv("ALLOW_UNAUTHENTICATED_PROXY")), "true") {
-		logging.Logger.Warn("ALLOW_UNAUTHENTICATED_PROXY is set -- proxy routes are unauthenticated (not recommended for production)")
+		logging.Logger.Warn("ALLOW_UNAUTHENTICATED_PROXY is set -- proxy routes are unauthenticated (dev mode only; not for production)")
 	}
 
 	if len(registry.List()) == 0 {
@@ -72,6 +128,16 @@ func Serve() {
 		corsOrigins = strings.Split(origins, ",")
 	}
 
+	// TRUSTED_PROXIES is a comma-separated list of CIDR blocks whose
+	// X-Forwarded-For / X-Real-IP headers are trusted for client-IP resolution.
+	// An empty or unset value falls back to the loopback default
+	// (127.0.0.0/8, ::1/128), which is appropriate for a local reverse proxy.
+	trustedProxies, err := httpserver.ParseTrustedProxyCIDRs(os.Getenv("TRUSTED_PROXIES"))
+	if err != nil {
+		logging.Logger.Error("invalid TRUSTED_PROXIES", "error", err)
+		os.Exit(1)
+	}
+
 	rlStore := NewRateLimitStore()
 	logReader, logMaintainer, logReaderBackend, err := CreateRequestLogReaderFromEnv()
 	if err != nil {
@@ -79,9 +145,9 @@ func Serve() {
 		os.Exit(1)
 	}
 
-	r := httpserver.NewRouter(registry, keyStore, corsOrigins, gw, cfgManager, rlStore, logReader, logMaintainer, masterKey)
+	r := httpserver.NewRouter(registry, keyStore, corsOrigins, gw, cfgManager, rlStore, logReader, logMaintainer, masterKey, trustedProxies)
 
-	addr := ":8080"
+	addr := defaultListenAddr
 	if p := os.Getenv("PORT"); p != "" {
 		addr = ":" + p
 	}
@@ -97,6 +163,13 @@ func Serve() {
 		"request_log_store", logReaderBackend,
 	)
 
+	return gw, srv, cfgManager, keyStore, logReader, otelShutdown
+}
+
+// runUntilShutdown starts the HTTP server and optional live model discovery,
+// then blocks until an OS signal or a fatal listen error. It returns the listen
+// error observed, if any.
+func runUntilShutdown(gw *aigateway.Gateway, srv *http.Server) error {
 	// Run the server in a goroutine so the main goroutine can block on signal
 	// or a fatal listen error.
 	serveErr := make(chan error, 1)
@@ -105,21 +178,45 @@ func Serve() {
 	// Block until OS signal or a fatal server error.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 
+	// Opt-in live model discovery: refreshes provider model lists in the
+	// background and stops when the lifecycle ctx is cancelled on shutdown.
+	if interval, ok := discoveryIntervalFromEnv(); ok {
+		if err := gw.StartDiscovery(ctx, interval); err != nil {
+			logging.Logger.Warn("model discovery not started", "error", err)
+		} else {
+			logging.Logger.Info("model discovery enabled", "interval", interval.String())
+		}
+	}
+
 	var listenErr error
 	select {
 	case <-ctx.Done():
 		logging.Logger.Info("shutdown signal received")
 	case listenErr = <-serveErr:
-		if listenErr != nil && listenErr != http.ErrServerClosed {
+		if listenErr != nil && !errors.Is(listenErr, http.ErrServerClosed) {
 			logging.Logger.Error("server error", "error", listenErr)
 		}
 	}
 	stop() // release signal resources; called explicitly so os.Exit below doesn't bypass it
+	return listenErr
+}
 
+// gracefulShutdown drains the HTTP server, closes the persistence stores, and
+// flushes OTel exporters in that order, then exits the process if the server
+// terminated on a fatal listen error.
+func gracefulShutdown(
+	srv *http.Server,
+	gw *aigateway.Gateway,
+	cfgManager admin.ConfigManager,
+	keyStore admin.Store,
+	logReader requestlog.Reader,
+	otelShutdown gwotel.ShutdownFunc,
+	listenErr error,
+) {
 	// Shutdown drains active connections before returning — CloseResources must
 	// come after so in-flight requests can still reach the stores.
 	logging.Logger.Info("shutting down gracefully")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGracePeriod)
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logging.Logger.Error("shutdown error", "error", err)
 	}
@@ -145,9 +242,26 @@ func Serve() {
 
 	logging.Logger.Info("server stopped")
 
-	if listenErr != nil && listenErr != http.ErrServerClosed {
+	if listenErr != nil && !errors.Is(listenErr, http.ErrServerClosed) {
 		os.Exit(1)
 	}
+}
+
+// discoveryIntervalFromEnv reads the FERRO_MODEL_DISCOVERY_INTERVAL env var and
+// returns the opt-in refresh interval for live model discovery. It is pure: it
+// performs no logging. Returns (0, false) when the var is unset/empty, fails to
+// parse, or resolves to a duration below the 1-minute minimum (which guards
+// against a hot-loop of provider API calls); otherwise (interval, true).
+func discoveryIntervalFromEnv() (time.Duration, bool) {
+	raw := strings.TrimSpace(os.Getenv("FERRO_MODEL_DISCOVERY_INTERVAL"))
+	if raw == "" {
+		return 0, false
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < time.Minute {
+		return 0, false
+	}
+	return d, true
 }
 
 // ResolveMasterKey returns the master key from the MASTER_KEY env var.
@@ -212,10 +326,14 @@ func RegisterProviders() *providers.Registry {
 		logging.Logger.Info("provider registered", "provider", entry.ID)
 	}
 
-	// AWS Bedrock: register if AWS_REGION or AWS_ACCESS_KEY_ID is set.
-	if region := os.Getenv("AWS_REGION"); region != "" || os.Getenv("AWS_ACCESS_KEY_ID") != "" {
+	// AWS Bedrock: register if AWS_REGION, AWS_ACCESS_KEY_ID, or
+	// AWS_BEARER_TOKEN_BEDROCK is set.
+	if region := os.Getenv("AWS_REGION"); region != "" ||
+		os.Getenv("AWS_ACCESS_KEY_ID") != "" ||
+		os.Getenv("AWS_BEARER_TOKEN_BEDROCK") != "" {
 		p, err := bedrockpkg.NewWithOptions(bedrockpkg.Options{
 			Region:          os.Getenv("AWS_REGION"),
+			BearerToken:     os.Getenv("AWS_BEARER_TOKEN_BEDROCK"),
 			AccessKeyID:     os.Getenv("AWS_ACCESS_KEY_ID"),
 			SecretAccessKey: os.Getenv("AWS_SECRET_ACCESS_KEY"),
 			SessionToken:    os.Getenv("AWS_SESSION_TOKEN"),
@@ -277,13 +395,16 @@ func NewRateLimitStore() *ratelimit.Store {
 		return nil
 	}
 	rps, err := strconv.ParseFloat(rpsStr, 64)
-	if err != nil || rps <= 0 {
+	if err != nil || math.IsNaN(rps) || math.IsInf(rps, 0) || rps <= 0 {
+		logging.Logger.Warn("rate limiting disabled: RATE_LIMIT_RPS must be a positive number", "value", rpsStr)
 		return nil
 	}
 	var burst float64
 	if burstStr := os.Getenv("RATE_LIMIT_BURST"); burstStr != "" {
-		if v, err := strconv.ParseFloat(burstStr, 64); err == nil {
+		if v, err := strconv.ParseFloat(burstStr, 64); err == nil && !math.IsNaN(v) && !math.IsInf(v, 0) && v >= 0 {
 			burst = v
+		} else {
+			logging.Logger.Warn("ignoring invalid RATE_LIMIT_BURST; using 0", "value", burstStr)
 		}
 	}
 	store := ratelimit.NewStore(rps, burst)

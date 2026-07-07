@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-**Ferro Labs AI Gateway** is a high-performance, open-source AI gateway written in Go. It acts as a unified routing layer between applications and 100+ LLM providers (OpenAI, Anthropic, Gemini, Mistral, etc.), offering smart routing, plugin middleware, and API key management — all with an OpenAI-compatible API and transparent pass-through proxy.
+**Ferro Labs AI Gateway** is a high-performance, open-source AI gateway written in Go. It acts as a unified routing layer between applications and 30 LLM providers (OpenAI, Anthropic, Gemini, Mistral, etc.), offering smart routing, plugin middleware, and API key management — all with an OpenAI-compatible API and transparent pass-through proxy.
 
 - **Module**: `github.com/ferro-labs/ai-gateway`
 - **Go version**: 1.25+
@@ -10,17 +10,23 @@
 
 ### Current Development Snapshot
 
-- **29 provider subpackages** — each provider lives in `providers/<id>/<id>.go` with its own test file. No root-level constructor shims remain.
+- **29 provider subpackages** — each provider lives in `providers/<id>/<id>.go` with its own test file. No root-level constructor shims remain. <!-- drift-ok: pre-existing subpackage count, not the canonical provider count -->
 - **Unified factory** — `providers/factory.go` holds types/constants; `providers/providers_list.go` holds all built-in `ProviderEntry` records. Auto-registration via `AllProviders()` means `main.go` never needs editing for new providers.
 - **`providers/core/` split** — interfaces in `contracts.go`; shared types split into `chat.go`, `stream.go`, `embedding.go`, `image.go`, `model.go`, `constants.go`, `errors.go`.
 - **Single source of truth for name constants** — `providers/names.go` re-exports `NameXxx` from each subpackage's `const Name`.
-- **`internal/discovery/`** — shared OpenAI-compatible model discovery helper used by fireworks, hugging_face, perplexity, xai.
+- **`internal/discovery/`** — shared OpenAI-compatible model discovery helper used by many OpenAI-compatible providers (fireworks, xai, moonshot, nvidia-nim, novita, …).
 - **Provider coverage** — OpenAI, Anthropic, Gemini, Groq, Bedrock, Vertex AI, Hugging Face, Cerebras, Cloudflare, Databricks, DeepInfra, Moonshot, Novita, NVIDIA NIM, OpenRouter, Qwen, SambaNova, and more.
 - **Built-in OSS plugins** — word filter, max token, response cache, request logger, rate limit, budget.
 - **Admin API** — dashboard, key management, usage stats, request logs, config history/rollback (`internal/admin/handlers.go`).
 - **Metrics** — Prometheus metrics exposed at `/metrics` (`internal/metrics/`).
 - **Circuit breaker** — per-provider circuit breaker in `internal/circuitbreaker/`.
 - **Observability (v1.1.0)** — OpenTelemetry tracing. Public `observability/` package (stable `Provider`/`Span`/`Exporter`/`Event` seam + `gen_ai.*`/`ferro.*` attribute constants); `internal/otel/` wires the OTLP exporter, W3C propagation, and a custom `IDGenerator` that unifies the OTel `trace_id` with the logging trace ID / `X-Request-ID`; `internal/redact/` redacts error messages. Defaults to a zero-allocation NoOp when no OTLP endpoint **and** no exporter are configured.
+
+---
+
+## Public-Facing Wording
+
+Keep all public-facing text — commit messages, godocs, `CHANGELOG.md`, `ROADMAP.md`, and GitHub issues/PRs — **neutral and outcome-focused**. Do **not** reference internal tooling, code-review services, AI assistants, private decisions, or how the change was produced; describe *what* changed and *why* it matters to users. Commit messages stay short and imperative; godocs stay brief with no meta-commentary or disclaimers.
 
 ---
 
@@ -56,10 +62,7 @@ docker-compose up   # local dev environment
 ai-gateway/
 ├── cmd/
 │   └── ferrogw/          # HTTP server + CLI entry point (Cobra subcommands)
-│       ├── main.go       # Server setup, provider registration, router, Cobra root
-│       ├── cors.go       # CORS middleware
-│       ├── completions.go # Legacy /v1/completions handler
-│       └── proxy.go      # Pass-through proxy for /v1/*
+│       └── main.go       # Server setup, provider registration, router, Cobra root
 ├── internal/
 │   ├── admin/            # API key management + auth middleware
 │   ├── cache/            # Cache interface + in-memory implementation
@@ -96,6 +99,9 @@ ai-gateway/
 │   │   ├── maxtoken/     # Token/message limit guardrail
 │   │   ├── ratelimit/    # Rate limiting
 │   │   └── wordfilter/   # Blocked word guardrail
+│   ├── handler/          # HTTP handlers (chat, completions, embeddings, images, models)
+│   ├── middleware/       # HTTP middleware (CORS, body-limit, rate-limit, security headers)
+│   ├── proxy/            # Pass-through proxy for /v1/*
 │   ├── ratelimit/        # Rate limit internals
 │   ├── strategies/       # Routing strategy implementations
 │   └── version/
@@ -132,7 +138,7 @@ ai-gateway/
 | `internal/otel/config.go` | OTel `Config` (endpoint, protocol, sample_ratio, privacy_level, shutdown_grace) + `Validate()` |
 | `internal/redact/redact.go` | `Redactor` applied to span/event error messages |
 | `internal/strategies/strategy.go` | `Strategy` interface |
-| `internal/discovery/openai_compat.go` | `DiscoverOpenAICompatibleModels` — shared by fireworks, hugging_face, perplexity, xai |
+| `internal/discovery/openai_compat.go` | `DiscoverOpenAICompatibleModels` — shared by many OpenAI-compatible providers (fireworks, xai, moonshot, nvidia-nim, …) |
 | `cmd/ferrogw/main.go` | HTTP server setup and entry point |
 | `internal/admin/middleware.go` | Bearer token auth middleware |
 
@@ -140,12 +146,12 @@ ai-gateway/
 
 ## Architecture & Design Patterns
 
-- **Strategy Pattern**: Routing strategies (`Single`, `Fallback`, `LoadBalance`, `LeastLatency`, `CostOptimized`, `Conditional`) all implement `Strategy` interface in `internal/strategies/`
+- **Strategy Pattern**: Routing strategies (`Single`, `Fallback`, `LoadBalance`, `LeastLatency`, `CostOptimized`, `Conditional`, `ContentBased`, `ABTest`) all implement `Strategy` interface in `internal/strategies/`
 - **Self-Describing Factory**: Each provider has a `ProviderEntry` in `providers/providers_list.go` — no `main.go` changes needed to add a provider
 - **Two-Mode Provider Init**: `ProviderConfigFromEnv` (OSS self-hosted) or direct `ProviderConfig` map (cloud/tenant credential injection)
 - **Plugin Middleware**: `plugin/manager.go` runs plugins at `before_request`, `after_request`, `on_error` stages
 - **OpenAI Compatibility**: All requests/responses match OpenAI spec — other provider responses are translated
-- **Pass-Through Proxy**: Unhandled `/v1/*` endpoints forwarded transparently via `cmd/ferrogw/proxy.go`
+- **Pass-Through Proxy**: Unhandled `/v1/*` endpoints forwarded transparently via `internal/proxy/proxy.go`
 - **Compile-time assertions**: Every provider subpackage has `var _ core.XxxProvider = (*Provider)(nil)` guards
 - **Observability seam**: `Gateway` holds exactly one `observability.Provider` (NoOp by default; install via `SetObservability`). `Route`/`RouteStream` open a `gateway.request` root span and stamp `gen_ai.*`/`ferro.*` attributes; plugins and MCP tool calls emit child spans. Registered exporters receive `gateway.request.completed`/`failed` events. With OTel disabled the hot path stays at the NoOp allocation baseline (asserted by `TestRoute_TracingOff_AllocBaseline`). Standard `OTEL_*` env vars take precedence over config.
 
@@ -209,7 +215,11 @@ observability:
 |----------|---------|
 | `MASTER_KEY` | Single admin credential for all auth (use `ferrogw init` to generate) |
 | `GATEWAY_CONFIG` | Path to config YAML/JSON |
+| `GATEWAY_ENV` | Set to `production` to enable production-mode safety guards (e.g. refuses to start if `ALLOW_UNAUTHENTICATED_PROXY=true`); unset or any other value is non-production mode |
 | `PORT` | Server port (default: 8080) |
+| `FERRO_MODEL_CATALOG_URL` | Override the model catalog source URL (used by `/v1/models` and model routing) |
+| `FERRO_MODEL_DISCOVERY_INTERVAL` | Opt-in interval (Go duration, e.g. 6h) to live-refresh model lists from provider /models endpoints; unset disables |
+| `ALLOW_UNAUTHENTICATED_PROXY` | Set to `true` to disable proxy-route auth (dev/local only; blocked when `GATEWAY_ENV=production`) |
 | `OPENAI_API_KEY` | OpenAI API key |
 | `ANTHROPIC_API_KEY` | Anthropic API key |
 | `GEMINI_API_KEY` | Google Gemini API key |
@@ -236,6 +246,7 @@ observability:
 | `AWS_ACCESS_KEY_ID` | AWS access key (optional — falls back to instance role) |
 | `AWS_SECRET_ACCESS_KEY` | AWS secret key |
 | `CORS_ORIGINS` | Comma-separated allowed CORS origins |
+| `TRUSTED_PROXIES` | Comma-separated CIDRs of trusted reverse proxies; `X-Forwarded-For`/`X-Real-IP` is honored only from these (default: loopback) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP collector endpoint; enables tracing when set (takes precedence over config) |
 | `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | Standard OTel head-sampler overrides |
 
@@ -265,7 +276,6 @@ observability:
 | `gopkg.in/yaml.v3` | YAML config parsing |
 | `github.com/aws/aws-sdk-go-v2` | AWS Bedrock integration |
 | `github.com/prometheus/client_golang` | Prometheus metrics |
-| `github.com/santhosh-tekuri/jsonschema/v5` | JSON schema validation (schemaguard plugin) |
 | `golang.org/x/oauth2` | Vertex AI service-account auth |
 | `github.com/spf13/cobra` | CLI subcommands (`ferrogw init`, `ferrogw doctor`, etc.) |
 | `modernc.org/sqlite` | SQLite for admin/key storage |

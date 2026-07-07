@@ -1,11 +1,14 @@
 package admin
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -182,7 +185,7 @@ func (s *SQLStore) Close() error {
 }
 
 // Create inserts a new API key in the SQL store.
-func (s *SQLStore) Create(name string, scopes []string, expiresAt *time.Time) (*APIKey, error) {
+func (s *SQLStore) Create(ctx context.Context, name string, scopes []string, expiresAt *time.Time) (*APIKey, error) {
 	if len(scopes) == 0 {
 		scopes = []string{ScopeAdmin}
 	}
@@ -210,7 +213,8 @@ func (s *SQLStore) Create(name string, scopes []string, expiresAt *time.Time) (*
 INSERT INTO api_keys(id, key, name, scopes, created_at, revoked_at, expires_at, rotated_at, active, usage_count, last_used_at)
 VALUES(?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, NULL)`)
 
-	if _, err := s.db.Exec(q, id, key, name, string(scopesJSON), now, expiresAt, true, 0); err != nil {
+	//nolint:gosec // G701 false positive: q is a static SQL template (s.bind rewrites placeholders); all values are passed as bound parameters, not interpolated.
+	if _, err := s.db.ExecContext(ctx, q, id, key, name, string(scopesJSON), now, expiresAt, true, 0); err != nil {
 		return nil, fmt.Errorf("create key: %w", err)
 	}
 
@@ -227,9 +231,9 @@ VALUES(?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, NULL)`)
 }
 
 // Get retrieves an API key by ID from the SQL store.
-func (s *SQLStore) Get(id string) (*APIKey, bool) {
-	key, err := s.scanOne(s.stmtGetByID, id)
-	if err == sql.ErrNoRows {
+func (s *SQLStore) Get(ctx context.Context, id string) (*APIKey, bool) {
+	key, err := s.scanOne(ctx, s.stmtGetByID, id)
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, false
 	}
 	if err != nil {
@@ -238,13 +242,28 @@ func (s *SQLStore) Get(id string) (*APIKey, bool) {
 	return key, true
 }
 
+// lookupForMutate fetches a key by ID for lookup-before-mutate paths. Unlike
+// Get, it distinguishes a genuine not-found (wrapped ErrKeyNotFound → 404) from
+// a transient DB/scan failure (wrapped generic error → 500) so a database
+// outage is never reported to callers as a 404.
+func (s *SQLStore) lookupForMutate(ctx context.Context, id string) (*APIKey, error) {
+	key, err := s.scanOne(ctx, s.stmtGetByID, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("%w: %s", ErrKeyNotFound, id)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lookup key %s: %w", id, err)
+	}
+	return key, nil
+}
+
 // List returns all API keys with masked key values.
-func (s *SQLStore) List() []*APIKey {
+func (s *SQLStore) List(ctx context.Context) []*APIKey {
 	q := `
 SELECT id, key, name, scopes, created_at, revoked_at, expires_at, rotated_at, last_used_at, usage_count, active
 FROM api_keys`
 
-	rows, err := s.db.Query(q)
+	rows, err := s.db.QueryContext(ctx, q)
 	if err != nil {
 		return []*APIKey{}
 	}
@@ -259,33 +278,31 @@ FROM api_keys`
 			continue
 		}
 		masked := *k
-		if len(masked.Key) > 8 {
-			masked.Key = masked.Key[:8] + "..."
-		}
+		masked.Key = maskKey(masked.Key)
 		keys = append(keys, &masked)
 	}
 	return keys
 }
 
 // Revoke marks an API key as inactive and records the revocation timestamp.
-func (s *SQLStore) Revoke(id string) error {
+func (s *SQLStore) Revoke(ctx context.Context, id string) error {
 	now := time.Now().UTC()
-	res, err := s.stmtRevoke.Exec(now, false, id)
+	res, err := s.stmtRevoke.ExecContext(ctx, now, false, id)
 	if err != nil {
 		return fmt.Errorf("revoke key: %w", err)
 	}
 	affected, _ := res.RowsAffected()
 	if affected == 0 {
-		return fmt.Errorf("key not found: %s", id)
+		return fmt.Errorf("%w: %s", ErrKeyNotFound, id)
 	}
 	return nil
 }
 
 // Update modifies API key metadata (name/scopes).
-func (s *SQLStore) Update(id string, name string, scopes []string) (*APIKey, error) {
-	current, ok := s.Get(id)
-	if !ok {
-		return nil, fmt.Errorf("key not found: %s", id)
+func (s *SQLStore) Update(ctx context.Context, id string, name string, scopes []string) (*APIKey, error) {
+	current, err := s.lookupForMutate(ctx, id)
+	if err != nil {
+		return nil, err
 	}
 
 	if name != "" {
@@ -300,52 +317,54 @@ func (s *SQLStore) Update(id string, name string, scopes []string) (*APIKey, err
 		return nil, fmt.Errorf("encode scopes: %w", err)
 	}
 
-	if _, err := s.stmtUpdate.Exec(current.Name, string(scopesJSON), id); err != nil {
+	if _, err := s.stmtUpdate.ExecContext(ctx, current.Name, string(scopesJSON), id); err != nil {
 		return nil, fmt.Errorf("update key: %w", err)
 	}
 
 	masked := *current
-	if len(masked.Key) > 8 {
-		masked.Key = masked.Key[:8] + "..."
-	}
+	masked.Key = maskKey(masked.Key)
 	return &masked, nil
 }
 
 // SetExpiration updates or clears the API key expiration time.
-func (s *SQLStore) SetExpiration(id string, expiresAt *time.Time) error {
+func (s *SQLStore) SetExpiration(ctx context.Context, id string, expiresAt *time.Time) error {
 	if expiresAt != nil {
 		t := expiresAt.UTC()
 		expiresAt = &t
 	}
 
-	res, err := s.stmtSetExpiry.Exec(expiresAt, id)
+	res, err := s.stmtSetExpiry.ExecContext(ctx, expiresAt, id)
 	if err != nil {
 		return fmt.Errorf("set key expiration: %w", err)
 	}
 	affected, _ := res.RowsAffected()
 	if affected == 0 {
-		return fmt.Errorf("key not found: %s", id)
+		return fmt.Errorf("%w: %s", ErrKeyNotFound, id)
 	}
 	return nil
 }
 
 // Delete removes an API key by ID.
-func (s *SQLStore) Delete(id string) error {
-	res, err := s.stmtDelete.Exec(id)
+func (s *SQLStore) Delete(ctx context.Context, id string) error {
+	res, err := s.stmtDelete.ExecContext(ctx, id)
 	if err != nil {
 		return fmt.Errorf("delete key: %w", err)
 	}
 	affected, _ := res.RowsAffected()
 	if affected == 0 {
-		return fmt.Errorf("key not found: %s", id)
+		return fmt.Errorf("%w: %s", ErrKeyNotFound, id)
 	}
 	return nil
 }
 
 // ValidateKey validates a full API key value and updates usage counters.
-func (s *SQLStore) ValidateKey(key string) (*APIKey, bool) {
-	apiKey, err := s.scanOne(s.stmtGetByKey, key)
-	if err == sql.ErrNoRows {
+// Auth succeeds as long as the key lookup and validity checks pass.
+// A transient failure of the usage-counter UPDATE is logged but does not fail
+// authentication — dropping one increment is preferable to returning a 401 on a
+// legitimate request.
+func (s *SQLStore) ValidateKey(ctx context.Context, key string) (*APIKey, bool) {
+	apiKey, err := s.scanOne(ctx, s.stmtGetByKey, key)
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, false
 	}
 	if err != nil {
@@ -357,45 +376,50 @@ func (s *SQLStore) ValidateKey(key string) (*APIKey, bool) {
 	if apiKey.ExpiresAt != nil && time.Now().After(*apiKey.ExpiresAt) {
 		return nil, false
 	}
+
+	// Auth check passed. Attempt to update usage counters. A failure here is
+	// non-fatal: log the error and return the authenticated key anyway.
 	now := time.Now().UTC()
-	if _, err := s.stmtUsage.Exec(now, apiKey.ID); err != nil {
-		return nil, false
+	if _, counterErr := s.stmtUsage.ExecContext(ctx, now, apiKey.ID); counterErr != nil {
+		slog.Warn("failed to update key usage counter; authentication still succeeds",
+			"key_id", apiKey.ID, "error", counterErr)
+	} else {
+		apiKey.UsageCount++
+		apiKey.LastUsedAt = &now
 	}
-	apiKey.UsageCount++
-	apiKey.LastUsedAt = &now
 	return apiKey, true
 }
 
 // RotateKey rotates the secret value for an existing API key.
-func (s *SQLStore) RotateKey(id string) (*APIKey, error) {
+func (s *SQLStore) RotateKey(ctx context.Context, id string) (*APIKey, error) {
 	newKey, err := generateAPIKeyString()
 	if err != nil {
 		return nil, err
 	}
 	now := time.Now().UTC()
 
-	res, err := s.stmtRotate.Exec(newKey, now, id)
+	res, err := s.stmtRotate.ExecContext(ctx, newKey, now, id)
 	if err != nil {
 		return nil, fmt.Errorf("rotate key: %w", err)
 	}
 	affected, _ := res.RowsAffected()
 	if affected == 0 {
-		return nil, fmt.Errorf("key not found: %s", id)
+		return nil, fmt.Errorf("%w: %s", ErrKeyNotFound, id)
 	}
 
-	updated, ok := s.Get(id)
-	if !ok {
-		return nil, fmt.Errorf("key not found: %s", id)
+	updated, err := s.lookupForMutate(ctx, id)
+	if err != nil {
+		return nil, err
 	}
 	return updated, nil
 }
 
-func (s *SQLStore) scanOne(stmt *sql.Stmt, arg any) (*APIKey, error) {
-	return scanAPIKey(stmt.QueryRow(arg))
+func (s *SQLStore) scanOne(ctx context.Context, stmt *sql.Stmt, arg any) (*APIKey, error) {
+	return scanAPIKey(stmt.QueryRowContext(ctx, arg))
 }
 
 func scanAPIKey(scanner interface {
-	Scan(dest ...interface{}) error
+	Scan(dest ...any) error
 }) (*APIKey, error) {
 	var (
 		k         APIKey

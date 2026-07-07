@@ -1,6 +1,12 @@
 # Ferro Labs AI Gateway Configuration Example
 # Copy to config.yaml and customize.
 
+# Maximum request body size in bytes for data-plane (/v1/*) and admin write
+# endpoints. Requests exceeding this limit receive HTTP 413.
+# Default: 10485760 (10 MiB). Set to a lower value to harden against large
+# POST attacks; set higher only if you need to send very large prompts.
+# max_request_bytes: 10485760
+
 strategy:
   mode: fallback  # single | fallback | loadbalance | conditional | content-based | ab-test | least-latency | cost-optimized
   # For cost-optimized mode only: fallback (default) | skip | allow.
@@ -16,7 +22,7 @@ strategy:
 #       value: gpt-4o
 #       target_key: openai
 #     - key: model
-#       value: claude-3-5-sonnet-20241022
+#       value: claude-sonnet-4-6
 #       target_key: anthropic
 # Routes based on the value of a request field (e.g. "model").
 
@@ -94,8 +100,8 @@ targets:
 # Aliases are resolved before routing and plugin execution.
 aliases:
   fast: gpt-4o-mini
-  smart: claude-3-5-sonnet-20241022
-  cheap: gemini-1.5-flash
+  smart: claude-sonnet-4-6
+  cheap: gemini-2.5-flash
   code: deepseek-coder
 
 # Optional plugins
@@ -216,7 +222,7 @@ observability:
     service_name: ferrogw
     sample_ratio: 1.0
     privacy_level: metadata  # none | metadata | full
-    shutdown_grace: 10s      # max time to drain in-flight OTel exports on shutdown
+    shutdown_grace: 10s      # per OTel shutdown stage; total can take up to 2x this value
     # headers:                       # OTLP export headers (e.g. vendor API keys)
     #   dd-api-key: "${DATADOG_API_KEY}"   # values support ${ENV} interpolation
 

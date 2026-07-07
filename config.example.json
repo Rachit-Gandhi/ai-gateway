@@ -1,4 +1,6 @@
 {
+  "_max_request_bytes_comment": "Max request body bytes for /v1/* and admin write routes. Default: 10485760 (10 MiB). Exceeding returns HTTP 413.",
+  "max_request_bytes": 10485760,
   "strategy": {
     "mode": "fallback",
     "_unpriced_strategy_comment": "cost-optimized only: fallback (default) | skip | allow",
@@ -9,7 +11,7 @@
       "mode": "conditional",
       "conditions": [
         { "key": "model", "value": "gpt-4o",                      "target_key": "openai" },
-        { "key": "model", "value": "claude-3-5-sonnet-20241022",  "target_key": "anthropic" }
+        { "key": "model", "value": "claude-sonnet-4-6",  "target_key": "anthropic" }
       ]
     }
   },
@@ -136,8 +138,8 @@
   ],
   "aliases": {
     "fast": "gpt-4o-mini",
-    "smart": "claude-3-5-sonnet-20241022",
-    "cheap": "gemini-1.5-flash",
+    "smart": "claude-sonnet-4-6",
+    "cheap": "gemini-2.5-flash",
     "code": "deepseek-coder"
   },
   "plugins": [
@@ -182,76 +184,6 @@
         "persist": false,
         "backend": "sqlite",
         "dsn": "ferrogw-requests.db"
-      }
-    },
-    {
-      "name": "pii-redact",
-      "type": "guardrail",
-      "stage": "before_request",
-      "enabled": false,
-      "config": {
-        "action": "redact",
-        "redact_mode": "replace_type",
-        "apply_to": "input",
-        "entities": []
-      }
-    },
-    {
-      "name": "secret-scan",
-      "type": "guardrail",
-      "stage": "before_request",
-      "enabled": false,
-      "config": {
-        "action": "block",
-        "entropy_check": true
-      }
-    },
-    {
-      "name": "prompt-shield",
-      "type": "guardrail",
-      "stage": "before_request",
-      "enabled": false,
-      "config": {
-        "action": "block",
-        "threshold": 0.9,
-        "apply_to": "user_messages"
-      }
-    },
-    {
-      "name": "schema-guard",
-      "type": "guardrail",
-      "stage": "after_request",
-      "enabled": false,
-      "config": {
-        "apply_to": "output",
-        "action": "block",
-        "extract_json": true,
-        "schema": {
-          "type": "object",
-          "required": [
-            "name",
-            "confidence"
-          ],
-          "properties": {
-            "name": {
-              "type": "string"
-            },
-            "confidence": {
-              "type": "number",
-              "minimum": 0,
-              "maximum": 1
-            }
-          }
-        }
-      }
-    },
-    {
-      "name": "regex-guard",
-      "type": "guardrail",
-      "stage": "before_request",
-      "enabled": false,
-      "config": {
-        "rules": []
       }
     },
     {

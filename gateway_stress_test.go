@@ -88,7 +88,7 @@ func TestStress_ShutdownUnderLoad_NoPanic(t *testing.T) {
 	gw.RegisterProvider(&stressStubProvider{name: "stub", models: []string{"gpt-4o"}})
 	// At least one hook so hasHooks() returns true and publishEvent actually
 	// enqueues into hookDispatchQ on every Route call.
-	gw.AddHook(func(_ context.Context, _ string, _ map[string]interface{}) {})
+	gw.AddHook(func(_ context.Context, _ string, _ map[string]any) {})
 
 	const workers = 50
 	var wg sync.WaitGroup
@@ -197,7 +197,7 @@ func TestStress_ReloadUnderLoad_NoRace(t *testing.T) {
 			default:
 			}
 			gw.mu.Lock()
-			gw.circuitBreakers["stub"] = circuitbreaker.New(5, 1, time.Second)
+			gw.circuitBreakers["stub"] = circuitbreaker.New(5, 1, 1, time.Second)
 			gw.providers["stub"] = &stressStubProvider{name: "stub", models: []string{"gpt-4o"}}
 			gw.mu.Unlock()
 			mutations.Add(1)

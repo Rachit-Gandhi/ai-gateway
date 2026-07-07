@@ -3,21 +3,23 @@ package together
 
 import (
 	"context"
-	"fmt"
 	"net/http"
-	"net/url"
 	"strings"
 
+	"github.com/ferro-labs/ai-gateway/internal/discovery"
 	providerhttp "github.com/ferro-labs/ai-gateway/internal/httpclient"
-	"github.com/ferro-labs/ai-gateway/internal/openaicompat"
 	"github.com/ferro-labs/ai-gateway/providers/core"
+	"github.com/ferro-labs/ai-gateway/providers/internal/openaicompat"
 )
 
 const (
 	// Name is the canonical identifier for the Together AI provider.
 	// Re-exported as providers.NameTogether in providers/names.go.
-	Name           = "together"
-	defaultBaseURL = "https://api.together.xyz"
+	Name = "together"
+	// defaultBaseURL is Together AI's current documented API domain. Users
+	// pinned to the legacy api.together.xyz host can override it via New's
+	// baseURL argument.
+	defaultBaseURL = "https://api.together.ai"
 )
 
 // Provider implements the core.Provider interface for Together AI.
@@ -34,17 +36,18 @@ var (
 	_ core.StreamProvider    = (*Provider)(nil)
 	_ core.EmbeddingProvider = (*Provider)(nil)
 	_ core.ProxiableProvider = (*Provider)(nil)
+	_ core.DiscoveryProvider = (*Provider)(nil)
 )
 
 // New creates a new Together AI provider.
 func New(apiKey, baseURL string) (*Provider, error) {
+	baseURL = strings.TrimSpace(baseURL)
 	if baseURL == "" {
 		baseURL = defaultBaseURL
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
-	u, err := url.Parse(baseURL)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return nil, fmt.Errorf("together: invalid base URL %q: must be http or https with a host", baseURL)
+	if err := core.ValidateBaseURL(Name, baseURL); err != nil {
+		return nil, err
 	}
 	return &Provider{
 		name:       Name,
@@ -52,6 +55,14 @@ func New(apiKey, baseURL string) (*Provider, error) {
 		baseURL:    baseURL,
 		httpClient: providerhttp.ForProvider(Name),
 	}, nil
+}
+
+// headers returns the auth and content-type headers for Together AI requests.
+func (p *Provider) headers() map[string]string {
+	return map[string]string{
+		"Authorization": "Bearer " + p.apiKey,
+		"Content-Type":  "application/json",
+	}
 }
 
 // Name implements core.Provider.
@@ -73,7 +84,6 @@ func (p *Provider) SupportedModels() []string {
 		"mistralai/Mixtral-8x7B-Instruct-v0.1",
 		"Qwen/Qwen2.5-72B-Instruct-Turbo",
 		"BAAI/bge-base-en-v1.5",
-		"baai/bge-base-en-v1.5",
 		"together-ai-embedding-up-to-150m",
 		"together-ai-embedding-151m-to-350m",
 	}
@@ -89,15 +99,11 @@ func (p *Provider) Models() []core.ModelInfo {
 	return core.ModelsFromList(p.name, p.SupportedModels())
 }
 
-// ------------------------------------------------------------------ types ---
-
-type errorDetail struct {
-	Message string `json:"message"`
-	Type    string `json:"type"`
-}
-
-type errorResponse struct {
-	Error errorDetail `json:"error"`
+// DiscoverModels fetches the live model list from the Together AI /v1/models
+// endpoint. Together returns a bare JSON array whose items omit owned_by, so the
+// shared helper's dual-shape parser applies and owned_by falls back to "together".
+func (p *Provider) DiscoverModels(ctx context.Context) ([]core.ModelInfo, error) {
+	return discovery.DiscoverOpenAICompatibleModels(ctx, p.httpClient, p.baseURL+"/v1/models", p.apiKey, p.name)
 }
 
 // Complete sends a chat completion request to Together AI.
@@ -107,7 +113,7 @@ func (p *Provider) Complete(ctx context.Context, req core.Request) (*core.Respon
 		URL:        p.baseURL + "/v1/chat/completions",
 		Provider:   p.name,
 		Label:      "together",
-		Headers:    map[string]string{"Authorization": "Bearer " + p.apiKey, "Content-Type": "application/json"},
+		Headers:    p.headers(),
 	}, req)
 }
 
@@ -118,6 +124,6 @@ func (p *Provider) CompleteStream(ctx context.Context, req core.Request) (<-chan
 		URL:        p.baseURL + "/v1/chat/completions",
 		Provider:   p.name,
 		Label:      "together",
-		Headers:    map[string]string{"Authorization": "Bearer " + p.apiKey, "Content-Type": "application/json"},
+		Headers:    p.headers(),
 	}, req)
 }

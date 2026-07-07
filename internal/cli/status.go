@@ -15,13 +15,11 @@ var StatusCmd = &cobra.Command{
 }
 
 func runStatus(cmd *cobra.Command, _ []string) error {
-	flagURL, _ := cmd.Root().PersistentFlags().GetString("gateway-url")
-	flagKey, _ := cmd.Root().PersistentFlags().GetString("api-key")
-	c := NewAdminClient(flagURL, flagKey)
+	c := adminClientFromCmd(cmd)
 
 	start := time.Now()
 	var health map[string]any
-	if err := c.Get("/health", &health); err != nil {
+	if err := c.Get(cmd.Context(), "/health", &health); err != nil {
 		fmt.Printf("  %s Gateway unreachable: %v\n", Clr(ColorRed, SymFAIL), err)
 		return nil
 	}
@@ -40,7 +38,7 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 
 	// Try to get provider count.
 	var provResp []map[string]any
-	if err := c.Get("/admin/providers", &provResp); err == nil && len(provResp) > 0 {
+	if err := c.Get(cmd.Context(), "/admin/providers", &provResp); err == nil && len(provResp) > 0 {
 		models := 0
 		for _, p := range provResp {
 			if m, ok := p["models"].([]any); ok {

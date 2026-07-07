@@ -3,14 +3,18 @@ package bedrock
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
 
+	providerhttp "github.com/ferro-labs/ai-gateway/internal/httpclient"
 	"github.com/ferro-labs/ai-gateway/providers/core"
 )
 
@@ -24,7 +28,7 @@ func TestNewBedrock_DefaultRegion(t *testing.T) {
 	if p.Name() != "bedrock" {
 		t.Errorf("Name() = %q, want bedrock", p.Name())
 	}
-	if p.Region() != "us-east-1" {
+	if p.Region() != defaultBedrockRegion {
 		t.Errorf("region = %q, want us-east-1", p.Region())
 	}
 }
@@ -46,11 +50,119 @@ func TestNewBedrockWithOptions_StaticCredentials(t *testing.T) {
 	}
 }
 
+func TestNewBedrockWithOptions_BearerTokenAuthHeaders(t *testing.T) {
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+
+	p, err := NewWithOptions(Options{
+		BearerToken: " test-bearer-token ",
+	})
+	if err != nil {
+		t.Fatalf("NewBedrockWithOptions() error: %v", err)
+	}
+	if p.Region() != defaultBedrockRegion {
+		t.Errorf("region = %q, want us-east-1", p.Region())
+	}
+
+	headers := p.AuthHeaders()
+	if got := headers["Authorization"]; got != "Bearer test-bearer-token" {
+		t.Errorf("Authorization = %q, want Bearer test-bearer-token", got)
+	}
+}
+
+func TestNewBedrockWithOptions_UsesTunedHTTPClient(t *testing.T) {
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+
+	p, err := NewWithOptions(Options{
+		Region:          "us-east-1",
+		AccessKeyID:     "test-access-key",
+		SecretAccessKey: "test-secret-key",
+	})
+	if err != nil {
+		t.Fatalf("NewWithOptions() error: %v", err)
+	}
+
+	client, ok := p.client.(realBedrockClient)
+	if !ok {
+		t.Fatalf("client type = %T, want realBedrockClient", p.client)
+	}
+	if got := client.Options().HTTPClient; got != providerhttp.ForProvider(Name) {
+		t.Errorf("SDK HTTPClient = %v, want the tuned per-provider client", got)
+	}
+}
+
+func TestNewBedrockWithOptions_BearerTokenConfiguresSDKAuthScheme(t *testing.T) {
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+
+	p, err := NewWithOptions(Options{ //nolint:gosec // G101: static fake bearer token for tests, not a real credential
+		BearerToken: "test-sdk-bearer-token",
+	})
+	if err != nil {
+		t.Fatalf("NewBedrockWithOptions() error: %v", err)
+	}
+
+	client, ok := p.client.(realBedrockClient)
+	if !ok {
+		t.Fatalf("client type = %T, want realBedrockClient", p.client)
+	}
+	opts := client.Options()
+	if !slices.Contains(opts.AuthSchemePreference, "httpBearerAuth") {
+		t.Fatalf("AuthSchemePreference = %#v, want httpBearerAuth", opts.AuthSchemePreference)
+	}
+	if opts.BearerAuthTokenProvider == nil {
+		t.Fatal("BearerAuthTokenProvider = nil, want configured provider")
+	}
+	token, err := opts.BearerAuthTokenProvider.RetrieveBearerToken(context.Background())
+	if err != nil {
+		t.Fatalf("RetrieveBearerToken() error: %v", err)
+	}
+	if token.Value != "test-sdk-bearer-token" {
+		t.Errorf("bearer token = %q, want test-sdk-bearer-token", token.Value)
+	}
+}
+
+func TestNewBedrockWithOptions_ExplicitBearerTokenOverridesSDKEnvToken(t *testing.T) {
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+	t.Setenv("AWS_BEARER_TOKEN_BEDROCK", "env-bearer-token")
+
+	p, err := NewWithOptions(Options{
+		BearerToken: "explicit-bearer-token",
+	})
+	if err != nil {
+		t.Fatalf("NewBedrockWithOptions() error: %v", err)
+	}
+
+	client, ok := p.client.(realBedrockClient)
+	if !ok {
+		t.Fatalf("client type = %T, want realBedrockClient", p.client)
+	}
+	opts := client.Options()
+	if !slices.Contains(opts.AuthSchemePreference, "httpBearerAuth") {
+		t.Fatalf("AuthSchemePreference = %#v, want httpBearerAuth", opts.AuthSchemePreference)
+	}
+	token, err := opts.BearerAuthTokenProvider.RetrieveBearerToken(context.Background())
+	if err != nil {
+		t.Fatalf("RetrieveBearerToken() error: %v", err)
+	}
+	if token.Value != "explicit-bearer-token" {
+		t.Errorf("bearer token = %q, want explicit-bearer-token", token.Value)
+	}
+	if got := p.AuthHeaders()["Authorization"]; got != "Bearer explicit-bearer-token" {
+		t.Errorf("Authorization = %q, want Bearer explicit-bearer-token", got)
+	}
+}
+
+func TestBedrockProvider_AuthHeaders_SigV4Default(t *testing.T) {
+	p := &Provider{name: Name}
+	if headers := p.AuthHeaders(); len(headers) != 0 {
+		t.Errorf("AuthHeaders() = %#v, want empty map for SigV4 auth", headers)
+	}
+}
+
 func TestNewBedrockWithOptions_InvalidStaticCredentials(t *testing.T) {
 	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
 
 	_, err := NewWithOptions(Options{
-		Region:      "us-east-1",
+		Region:      defaultBedrockRegion,
 		AccessKeyID: "test-access-key",
 	})
 	if err == nil {
@@ -85,6 +197,7 @@ func TestBedrockProvider_SupportedEmbeddingModels(t *testing.T) {
 
 	for _, wantSupported := range []string{
 		"us.amazon.titan-embed-text-v2:0",
+		"global.amazon.titan-embed-text-v2:0",
 		"us-gov-east-1/amazon.titan-embed-text-v1",
 		"cohere.embed-future:0",
 	} {
@@ -104,11 +217,224 @@ func TestBedrockProvider_SupportedEmbeddingModels(t *testing.T) {
 	}
 }
 
-func TestBedrockProvider_Embed_TitanTextLoopsAndMapsResponse(t *testing.T) {
+func TestBedrockProvider_SupportsModel_CrossRegionInferenceProfiles(t *testing.T) {
+	p := &Provider{name: Name}
+
+	for _, model := range []string{
+		"us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+		"eu.amazon.titan-text-express-v1",
+		"apac.meta.llama3-1-70b-instruct-v1:0",
+		"global.anthropic.claude-sonnet-4-20250514-v1:0",
+		"us.amazon.nova-lite-v1:0",
+		"global.amazon.nova-pro-v1:0",
+		"global.amazon.nova-2-lite-v1:0",
+		"us-gov-west-1/amazon.nova-pro-v1:0",
+		"us-gov-west-1/amazon.titan-text-premier-v1:0",
+	} {
+		t.Run(model, func(t *testing.T) {
+			if !p.SupportsModel(model) {
+				t.Errorf("SupportsModel(%q) = false, want true", model)
+			}
+		})
+	}
+}
+
+func TestBedrockProvider_SupportsModel_NovaTextModels(t *testing.T) {
+	p := &Provider{name: Name}
+
+	for _, model := range []string{
+		"amazon.nova-micro-v1:0",
+		"amazon.nova-lite-v1:0",
+		"amazon.nova-pro-v1:0",
+		"amazon.nova-premier-v1:0",
+		"amazon.nova-2-lite-v1:0",
+		"amazon.nova-2-pro-preview-20251202-v1:0",
+		"us.amazon.nova-lite-v1:0",
+		"eu.amazon.nova-micro-v1:0",
+		"apac.amazon.nova-pro-v1:0",
+		"global.amazon.nova-2-lite-v1:0",
+		"us-gov-west-1/amazon.nova-pro-v1:0",
+	} {
+		t.Run(model, func(t *testing.T) {
+			if !p.SupportsModel(model) {
+				t.Errorf("SupportsModel(%q) = false, want true", model)
+			}
+		})
+	}
+
+	// amazon.nova-canvas is an image-generation model (see image.go); it is
+	// intentionally not in the Nova-text set but IS a supported image model.
+	for _, model := range []string{
+		"amazon.nova-reel-v1:0",
+		"amazon.nova-2-multimodal-embeddings-v1:0",
+	} {
+		t.Run(model, func(t *testing.T) {
+			if p.SupportsModel(model) {
+				t.Errorf("SupportsModel(%q) = true, want false", model)
+			}
+		})
+	}
+}
+
+func TestBedrockProvider_Complete_CrossRegionInferenceProfileDispatchesWithOriginalModelID(t *testing.T) {
 	fake := &fakeBedrockRuntimeClient{
 		responses: [][]byte{
-			[]byte(`{"embedding":[0.1,0.2],"inputTextTokenCount":2}`),
-			[]byte(`{"embedding":[0.3,0.4],"inputTextTokenCount":3}`),
+			[]byte(`{"id":"msg-1","type":"message","role":"assistant","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn","usage":{"input_tokens":2,"output_tokens":1}}`),
+		},
+	}
+	p := &Provider{name: Name, client: fake}
+
+	resp, err := p.Complete(context.Background(), core.Request{
+		Model: "global.anthropic.claude-sonnet-4-20250514-v1:0",
+		Messages: []core.Message{
+			{Role: core.RoleUser, Content: "hello"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Complete() error: %v", err)
+	}
+	if len(fake.invokeCalls) != 1 {
+		t.Fatalf("InvokeModel calls = %d, want 1", len(fake.invokeCalls))
+	}
+	if got := aws.ToString(fake.invokeCalls[0].ModelId); got != "global.anthropic.claude-sonnet-4-20250514-v1:0" {
+		t.Errorf("ModelId = %q, want original inference profile ID", got)
+	}
+	if resp.Model != "global.anthropic.claude-sonnet-4-20250514-v1:0" {
+		t.Errorf("response Model = %q, want original inference profile ID", resp.Model)
+	}
+}
+
+func TestBedrockProvider_Complete_NovaDispatchesWithOriginalModelID(t *testing.T) {
+	fake := &fakeBedrockRuntimeClient{
+		responses: [][]byte{
+			[]byte(`{"output":{"message":{"role":"assistant","content":[{"text":"hello"},{"text":" world"}]}},"stopReason":"end_turn","usage":{"inputTokens":3,"outputTokens":2,"totalTokens":5}}`),
+		},
+	}
+	p := &Provider{name: Name, client: fake}
+	maxTokens := 64
+	temperature := 0.3
+	topP := 0.9
+
+	resp, err := p.Complete(context.Background(), core.Request{
+		Model:       "global.amazon.nova-pro-v1:0",
+		MaxTokens:   &maxTokens,
+		Temperature: &temperature,
+		TopP:        &topP,
+		Stop:        []string{"STOP"},
+		Messages: []core.Message{
+			{Role: core.RoleSystem, Content: "be concise"},
+			{Role: core.RoleUser, Content: "hello"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Complete() error: %v", err)
+	}
+	if len(fake.invokeCalls) != 1 {
+		t.Fatalf("InvokeModel calls = %d, want 1", len(fake.invokeCalls))
+	}
+	if got := aws.ToString(fake.invokeCalls[0].ModelId); got != "global.amazon.nova-pro-v1:0" {
+		t.Errorf("ModelId = %q, want original inference profile ID", got)
+	}
+	var body bedrockNovaRequest
+	mustUnmarshalBody(t, fake.invokeCalls[0].Body, &body)
+	if body.SchemaVersion != "messages-v1" {
+		t.Errorf("schemaVersion = %q, want messages-v1", body.SchemaVersion)
+	}
+	if len(body.System) != 1 || body.System[0].Text != "be concise" {
+		t.Errorf("system = %#v, want system prompt", body.System)
+	}
+	if len(body.Messages) != 1 || body.Messages[0].Role != "user" || len(body.Messages[0].Content) != 1 || body.Messages[0].Content[0].Text != "hello" {
+		t.Errorf("messages = %#v, want user text message", body.Messages)
+	}
+	if body.InferenceConfig == nil {
+		t.Fatal("inferenceConfig = nil, want configured sampling params")
+	}
+	if body.InferenceConfig.MaxTokens != maxTokens || body.InferenceConfig.Temperature == nil || *body.InferenceConfig.Temperature != temperature || body.InferenceConfig.TopP == nil || *body.InferenceConfig.TopP != topP {
+		t.Errorf("inferenceConfig = %+v, want configured sampling params", body.InferenceConfig)
+	}
+	if len(body.InferenceConfig.StopSequences) != 1 || body.InferenceConfig.StopSequences[0] != "STOP" {
+		t.Errorf("stopSequences = %#v, want STOP", body.InferenceConfig.StopSequences)
+	}
+	if resp.Model != "global.amazon.nova-pro-v1:0" || resp.Choices[0].Message.Content != "hello world" || resp.Choices[0].FinishReason != "stop" {
+		t.Errorf("response = %+v, want mapped Nova response with normalized finish reason", resp)
+	}
+	if resp.Usage.PromptTokens != 3 || resp.Usage.CompletionTokens != 2 || resp.Usage.TotalTokens != 5 {
+		t.Errorf("usage = %+v, want Nova usage", resp.Usage)
+	}
+}
+
+func TestBedrockProvider_Complete_NovaUsageFallsBackToInputPlusOutputTokens(t *testing.T) {
+	fake := &fakeBedrockRuntimeClient{
+		responses: [][]byte{
+			[]byte(`{"output":{"message":{"role":"assistant","content":[{"text":"ok"}]}},"stopReason":"end_turn","usage":{"inputTokens":1,"outputTokens":2}}`),
+		},
+	}
+	p := &Provider{name: Name, client: fake}
+
+	resp, err := p.Complete(context.Background(), core.Request{
+		Model: "amazon.nova-micro-v1:0",
+		Messages: []core.Message{
+			{Role: core.RoleUser, Content: "hello"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Complete() error: %v", err)
+	}
+	if resp.Usage.TotalTokens != 3 {
+		t.Errorf("TotalTokens = %d, want input+output fallback 3", resp.Usage.TotalTokens)
+	}
+}
+
+func TestBedrockProvider_Complete_NovaNormalizesFinishReason(t *testing.T) {
+	cases := []struct {
+		name       string
+		stopReason string
+		want       string
+	}{
+		{name: "end_turn -> stop", stopReason: "end_turn", want: "stop"},
+		{name: "max_tokens -> length", stopReason: "max_tokens", want: "length"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := fmt.Sprintf(`{"output":{"message":{"role":"assistant","content":[{"text":"hi"}]}},"stopReason":%q,"usage":{"inputTokens":1,"outputTokens":1}}`, tc.stopReason)
+			fake := &fakeBedrockRuntimeClient{responses: [][]byte{[]byte(body)}}
+			p := &Provider{name: Name, client: fake}
+
+			resp, err := p.Complete(context.Background(), core.Request{
+				Model:    "amazon.nova-micro-v1:0",
+				Messages: []core.Message{{Role: core.RoleUser, Content: "hi"}},
+			})
+			if err != nil {
+				t.Fatalf("Complete() error: %v", err)
+			}
+			if got := resp.Choices[0].FinishReason; got != tc.want {
+				t.Errorf("finish_reason = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBedrockProvider_Embed_TitanTextLoopsAndMapsResponse(t *testing.T) {
+	// embedTitan now issues one InvokeModel call per input text concurrently
+	// (bounded by bedrockTitanEmbedConcurrency), so call arrival order is not
+	// guaranteed. responseFor matches each response to its request by the
+	// InputText it carries instead of by call index.
+	responseByText := map[string][]byte{
+		"first":  []byte(`{"embedding":[0.1,0.2],"inputTextTokenCount":2}`),
+		"second": []byte(`{"embedding":[0.3,0.4],"inputTextTokenCount":3}`),
+	}
+	fake := &fakeBedrockRuntimeClient{
+		responseFor: func(input *bedrockruntime.InvokeModelInput) ([]byte, error) {
+			var req bedrockTitanEmbedRequest
+			if err := json.Unmarshal(input.Body, &req); err != nil {
+				return nil, err
+			}
+			body, ok := responseByText[req.InputText]
+			if !ok {
+				return nil, fmt.Errorf("no fake response for input text %q", req.InputText)
+			}
+			return body, nil
 		},
 	}
 	p := &Provider{name: Name, client: fake}
@@ -126,6 +452,7 @@ func TestBedrockProvider_Embed_TitanTextLoopsAndMapsResponse(t *testing.T) {
 	if len(fake.invokeCalls) != 2 {
 		t.Fatalf("InvokeModel calls = %d, want 2", len(fake.invokeCalls))
 	}
+	seenTexts := make(map[string]bool)
 	for i, call := range fake.invokeCalls {
 		if got := aws.ToString(call.ModelId); got != "amazon.titan-embed-text-v2:0" {
 			t.Errorf("call %d ModelId = %q", i, got)
@@ -136,16 +463,15 @@ func TestBedrockProvider_Embed_TitanTextLoopsAndMapsResponse(t *testing.T) {
 		if got := aws.ToString(call.Accept); got != "application/json" {
 			t.Errorf("call %d Accept = %q", i, got)
 		}
+		var body bedrockTitanEmbedRequest
+		mustUnmarshalBody(t, call.Body, &body)
+		seenTexts[body.InputText] = true
+		if body.Dimensions == nil || *body.Dimensions != dimensions {
+			t.Errorf("call %d Titan dimensions = %v, want %d", i, body.Dimensions, dimensions)
+		}
 	}
-
-	var firstReq, secondReq bedrockTitanEmbedRequest
-	mustUnmarshalBody(t, fake.invokeCalls[0].Body, &firstReq)
-	mustUnmarshalBody(t, fake.invokeCalls[1].Body, &secondReq)
-	if firstReq.InputText != "first" || secondReq.InputText != "second" {
-		t.Errorf("Titan inputText values = %q, %q; want first, second", firstReq.InputText, secondReq.InputText)
-	}
-	if firstReq.Dimensions == nil || *firstReq.Dimensions != dimensions {
-		t.Errorf("Titan dimensions = %v, want %d", firstReq.Dimensions, dimensions)
+	if !seenTexts["first"] || !seenTexts["second"] {
+		t.Errorf("Titan inputText values = %v, want both %q and %q present", seenTexts, "first", "second")
 	}
 
 	if resp.Object != "list" || resp.Model != "amazon.titan-embed-text-v2:0" {
@@ -551,26 +877,263 @@ func TestBedrockProvider_Embed_Validation(t *testing.T) {
 	}
 }
 
+// TestBedrockProvider_WrapsSDKError verifies Complete, Embed, and GenerateImage
+// across the model families surface a %w-wrapped "bedrock invoke failed" error.
+func TestBedrockProvider_WrapsSDKError(t *testing.T) {
+	sdkErr := errors.New("simulated bedrock SDK failure")
+
+	cases := []struct {
+		name string
+		call func(context.Context, *Provider) error
+	}{
+		{
+			name: "anthropic complete",
+			call: func(ctx context.Context, p *Provider) error {
+				_, err := p.Complete(ctx, core.Request{
+					Model:    "anthropic.claude-3-5-sonnet-20241022-v2:0",
+					Messages: []core.Message{{Role: core.RoleUser, Content: "hi"}},
+				})
+				return err
+			},
+		},
+		{
+			name: "titan complete",
+			call: func(ctx context.Context, p *Provider) error {
+				_, err := p.Complete(ctx, core.Request{
+					Model:    "amazon.titan-text-express-v1",
+					Messages: []core.Message{{Role: core.RoleUser, Content: "hi"}},
+				})
+				return err
+			},
+		},
+		{
+			name: "nova complete",
+			call: func(ctx context.Context, p *Provider) error {
+				_, err := p.Complete(ctx, core.Request{
+					Model:    "amazon.nova-micro-v1:0",
+					Messages: []core.Message{{Role: core.RoleUser, Content: "hi"}},
+				})
+				return err
+			},
+		},
+		{
+			name: "llama complete",
+			call: func(ctx context.Context, p *Provider) error {
+				_, err := p.Complete(ctx, core.Request{
+					Model:    "meta.llama3-1-8b-instruct-v1:0",
+					Messages: []core.Message{{Role: core.RoleUser, Content: "hi"}},
+				})
+				return err
+			},
+		},
+		{
+			name: "titan embed",
+			call: func(ctx context.Context, p *Provider) error {
+				_, err := p.Embed(ctx, core.EmbeddingRequest{
+					Model: "amazon.titan-embed-text-v2:0",
+					Input: "hi",
+				})
+				return err
+			},
+		},
+		{
+			name: "cohere embed",
+			call: func(ctx context.Context, p *Provider) error {
+				_, err := p.Embed(ctx, core.EmbeddingRequest{
+					Model: "cohere.embed-english-v3",
+					Input: "hi",
+				})
+				return err
+			},
+		},
+		{
+			name: "titan/nova image",
+			call: func(ctx context.Context, p *Provider) error {
+				_, err := p.GenerateImage(ctx, core.ImageRequest{
+					Model:  "amazon.nova-canvas-v1:0",
+					Prompt: "a cat",
+				})
+				return err
+			},
+		},
+		{
+			name: "stability image",
+			call: func(ctx context.Context, p *Provider) error {
+				_, err := p.GenerateImage(ctx, core.ImageRequest{
+					Model:  "stability.stable-diffusion-xl-v1",
+					Prompt: "a cat",
+				})
+				return err
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeBedrockRuntimeClient{err: sdkErr}
+			p := &Provider{name: Name, client: fake}
+
+			err := tc.call(context.Background(), p)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !errors.Is(err, sdkErr) {
+				t.Fatalf("error %v does not wrap the SDK error", err)
+			}
+			if !strings.Contains(err.Error(), "bedrock invoke failed") {
+				t.Errorf("error = %q, want it to contain 'bedrock invoke failed'", err.Error())
+			}
+			if len(fake.invokeCalls) == 0 {
+				t.Error("expected at least one InvokeModel call before the error surfaced")
+			}
+		})
+	}
+}
+
+// TestBedrockProvider_CompleteStreamAnthropic_SurfacesMidStreamDecoderError feeds
+// an Anthropic mid-stream "error" event so the decoder returns a non-nil error,
+// exercising the in-stream decoder-error branch that emits a StreamChunk.Error
+// and stops reading. It also asserts the streamed request shape recorded in
+// invokeStreamCalls.
+func TestBedrockProvider_CompleteStreamAnthropic_SurfacesMidStreamDecoderError(t *testing.T) {
+	fake := &fakeBedrockRuntimeClient{
+		streamResponses: [][]byte{
+			[]byte(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}`),
+			[]byte(`{"type":"error","error":{"type":"overloaded_error","message":"upstream overloaded"}}`),
+		},
+	}
+	p := &Provider{name: Name, client: fake}
+	maxTokens := 32
+
+	ch, err := p.CompleteStream(context.Background(), core.Request{
+		Model:     "anthropic.claude-3-5-sonnet-20241022-v2:0",
+		MaxTokens: &maxTokens,
+		Messages:  []core.Message{{Role: core.RoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("CompleteStream() error: %v", err)
+	}
+
+	var chunks []core.StreamChunk
+	for c := range ch {
+		chunks = append(chunks, c)
+	}
+
+	if len(chunks) < 2 {
+		t.Fatalf("chunks = %#v, want a text chunk followed by an error chunk", chunks)
+	}
+	if chunks[0].Choices[0].Delta.Content != "partial" {
+		t.Errorf("first chunk content = %q, want partial", chunks[0].Choices[0].Delta.Content)
+	}
+	last := chunks[len(chunks)-1]
+	if last.Error == nil {
+		t.Fatalf("final chunk = %#v, want a decoder error", last)
+	}
+	if !strings.Contains(last.Error.Error(), "upstream overloaded") {
+		t.Errorf("decoder error = %v, want the mid-stream error message", last.Error)
+	}
+
+	// invokeStreamCalls records the outbound streamed request shape.
+	if len(fake.invokeStreamCalls) != 1 {
+		t.Fatalf("InvokeModelWithResponseStream calls = %d, want 1", len(fake.invokeStreamCalls))
+	}
+	call := fake.invokeStreamCalls[0]
+	if got := aws.ToString(call.ModelId); got != "anthropic.claude-3-5-sonnet-20241022-v2:0" {
+		t.Errorf("stream ModelId = %q, want the request model", got)
+	}
+	if got := aws.ToString(call.ContentType); got != "application/json" {
+		t.Errorf("stream ContentType = %q, want application/json", got)
+	}
+	var body bedrockAnthropicRequest
+	mustUnmarshalBody(t, call.Body, &body)
+	if body.AnthropicVersion != "bedrock-2023-05-31" {
+		t.Errorf("anthropic_version = %q, want bedrock-2023-05-31", body.AnthropicVersion)
+	}
+	if body.MaxTokens != maxTokens {
+		t.Errorf("max_tokens = %d, want %d", body.MaxTokens, maxTokens)
+	}
+}
+
+// TestBedrockProvider_CompleteStreamAnthropic_PropagatesTerminalStreamErr drains
+// a well-formed event stream whose terminal Err() is non-nil, exercising the
+// CompleteStream branch that surfaces stream.Err() as a final StreamChunk.Error.
+func TestBedrockProvider_CompleteStreamAnthropic_PropagatesTerminalStreamErr(t *testing.T) {
+	streamErr := errors.New("event stream transport failure")
+	fake := &fakeBedrockRuntimeClient{
+		streamResponses: [][]byte{
+			[]byte(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}`),
+		},
+		streamErr: streamErr,
+	}
+	p := &Provider{name: Name, client: fake}
+
+	ch, err := p.CompleteStream(context.Background(), core.Request{
+		Model:    "anthropic.claude-3-5-sonnet-20241022-v2:0",
+		Messages: []core.Message{{Role: core.RoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("CompleteStream() error: %v", err)
+	}
+
+	var chunks []core.StreamChunk
+	for c := range ch {
+		chunks = append(chunks, c)
+	}
+
+	if len(chunks) == 0 {
+		t.Fatal("expected at least the terminal error chunk")
+	}
+	last := chunks[len(chunks)-1]
+	if last.Error == nil || !errors.Is(last.Error, streamErr) {
+		t.Fatalf("final chunk = %#v, want the terminal stream.Err() propagated", last)
+	}
+}
+
 type fakeBedrockRuntimeClient struct {
+	mu                sync.Mutex
 	invokeCalls       []*bedrockruntime.InvokeModelInput
 	invokeStreamCalls []*bedrockruntime.InvokeModelWithResponseStreamInput
 	responses         [][]byte
 	streamResponses   [][]byte
 	err               error
+	// streamErr, when set, is returned by the fake event stream's terminal Err()
+	// after all events have been consumed, exercising the CompleteStream path
+	// that surfaces a transport-level stream error as a final StreamChunk.Error.
+	streamErr error
+	// responseFor, when set, selects the response body for a given call
+	// instead of the index-based responses slice. It lets tests that issue
+	// concurrent InvokeModel calls (e.g. bedrock_embed.go's parallel Titan
+	// requests) match a response to its request deterministically rather than
+	// relying on call arrival order, which is not guaranteed under concurrency.
+	responseFor func(*bedrockruntime.InvokeModelInput) ([]byte, error)
 }
 
 func (f *fakeBedrockRuntimeClient) InvokeModel(_ context.Context, input *bedrockruntime.InvokeModelInput, _ ...func(*bedrockruntime.Options)) (*bedrockruntime.InvokeModelOutput, error) {
 	copied := *input
 	copied.Body = append([]byte(nil), input.Body...)
+
+	f.mu.Lock()
 	f.invokeCalls = append(f.invokeCalls, &copied)
-	if f.err != nil {
-		return nil, f.err
-	}
 	idx := len(f.invokeCalls) - 1
-	if idx >= len(f.responses) {
+	responseFor := f.responseFor
+	callErr := f.err
+	responses := f.responses
+	f.mu.Unlock()
+
+	if callErr != nil {
+		return nil, callErr
+	}
+	if responseFor != nil {
+		body, err := responseFor(&copied)
+		if err != nil {
+			return nil, err
+		}
+		return &bedrockruntime.InvokeModelOutput{Body: body}, nil
+	}
+	if idx >= len(responses) {
 		return nil, fmt.Errorf("missing fake response for call %d", idx)
 	}
-	return &bedrockruntime.InvokeModelOutput{Body: f.responses[idx]}, nil
+	return &bedrockruntime.InvokeModelOutput{Body: responses[idx]}, nil
 }
 
 func (f *fakeBedrockRuntimeClient) InvokeModelWithResponseStream(_ context.Context, input *bedrockruntime.InvokeModelWithResponseStreamInput, _ ...func(*bedrockruntime.Options)) (bedrockEventStream, error) {
@@ -585,11 +1148,12 @@ func (f *fakeBedrockRuntimeClient) InvokeModelWithResponseStream(_ context.Conte
 		events <- &types.ResponseStreamMemberChunk{Value: types.PayloadPart{Bytes: body}}
 	}
 	close(events)
-	return fakeBedrockResponseStreamReader{events: events}, nil
+	return fakeBedrockResponseStreamReader{events: events, err: f.streamErr}, nil
 }
 
 type fakeBedrockResponseStreamReader struct {
 	events <-chan types.ResponseStream
+	err    error
 }
 
 func (f fakeBedrockResponseStreamReader) Events() <-chan types.ResponseStream {
@@ -601,7 +1165,7 @@ func (f fakeBedrockResponseStreamReader) Close() error {
 }
 
 func (f fakeBedrockResponseStreamReader) Err() error {
-	return nil
+	return f.err
 }
 
 func mustUnmarshalBody(t *testing.T, body []byte, out any) {

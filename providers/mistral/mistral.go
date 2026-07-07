@@ -6,9 +6,10 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/ferro-labs/ai-gateway/internal/discovery"
 	providerhttp "github.com/ferro-labs/ai-gateway/internal/httpclient"
-	"github.com/ferro-labs/ai-gateway/internal/openaicompat"
 	"github.com/ferro-labs/ai-gateway/providers/core"
+	"github.com/ferro-labs/ai-gateway/providers/internal/openaicompat"
 )
 
 const (
@@ -32,12 +33,16 @@ var (
 	_ core.StreamProvider    = (*Provider)(nil)
 	_ core.EmbeddingProvider = (*Provider)(nil)
 	_ core.ProxiableProvider = (*Provider)(nil)
+	_ core.DiscoveryProvider = (*Provider)(nil)
 )
 
 // New creates a new Mistral provider.
 func New(apiKey, baseURL string) (*Provider, error) {
+	baseURL = strings.TrimSpace(baseURL)
 	if baseURL == "" {
 		baseURL = defaultBaseURL
+	} else if err := core.ValidateBaseURL(Name, baseURL); err != nil {
+		return nil, err
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
 	return &Provider{
@@ -87,35 +92,54 @@ func (p *Provider) Models() []core.ModelInfo {
 	return core.ModelsFromList(p.name, p.SupportedModels())
 }
 
-// ------------------------------------------------------------------ types ---
-
-type errorDetail struct {
-	Message string `json:"message"`
-	Type    string `json:"type"`
+// DiscoverModels fetches the live model list from the Mistral /v1/models endpoint.
+func (p *Provider) DiscoverModels(ctx context.Context) ([]core.ModelInfo, error) {
+	return discovery.DiscoverOpenAICompatibleModels(ctx, p.httpClient, p.baseURL+"/v1/models", p.apiKey, p.name)
 }
 
-type errorResponse struct {
-	Error errorDetail `json:"error"`
+// mistralChatBody reshapes the OpenAI-shaped chat body for Mistral's API, which
+// ignores the standard "seed" field and instead honours "random_seed". The
+// embedded core.Request forwards every other OpenAI field unchanged. The Seed
+// field shadows the promoted core.Request.Seed at a shallower depth and is left
+// nil (omitempty) so "seed" is never emitted on the wire; RandomSeed carries the
+// value under Mistral's expected key.
+//
+// A json:"-" shadow does not work here: encoding/json drops "-" fields entirely,
+// so the promoted core.Request.Seed would still be emitted. A same-named field
+// that dominates by depth and is omitted via omitempty is what actually
+// suppresses it (verified by TestMistralProvider_Complete_SeedRewrite).
+type mistralChatBody struct {
+	core.Request
+	Seed       *int64 `json:"seed,omitempty"`        // shadows core.Request.Seed; always nil so "seed" is suppressed
+	RandomSeed *int64 `json:"random_seed,omitempty"` // Mistral's seed field
+}
+
+// mistralChatTransform maps core.Request onto Mistral's chat body, renaming
+// seed → random_seed.
+func mistralChatTransform(req core.Request) any {
+	return mistralChatBody{Request: req, RandomSeed: req.Seed}
 }
 
 // Complete sends a chat completion request to Mistral.
 func (p *Provider) Complete(ctx context.Context, req core.Request) (*core.Response, error) {
 	return openaicompat.PostChat(ctx, openaicompat.ChatParams{
-		HTTPClient: p.httpClient,
-		URL:        p.baseURL + "/v1/chat/completions",
-		Provider:   p.name,
-		Label:      "mistral",
-		Headers:    map[string]string{"Authorization": "Bearer " + p.apiKey, "Content-Type": "application/json"},
+		HTTPClient:    p.httpClient,
+		URL:           p.baseURL + "/v1/chat/completions",
+		Provider:      p.name,
+		Label:         "mistral",
+		Headers:       map[string]string{"Authorization": "Bearer " + p.apiKey, "Content-Type": "application/json"},
+		BodyTransform: mistralChatTransform,
 	}, req)
 }
 
 // CompleteStream sends a streaming chat completion request to Mistral.
 func (p *Provider) CompleteStream(ctx context.Context, req core.Request) (<-chan core.StreamChunk, error) {
 	return openaicompat.PostStream(ctx, openaicompat.ChatParams{
-		HTTPClient: p.httpClient,
-		URL:        p.baseURL + "/v1/chat/completions",
-		Provider:   p.name,
-		Label:      "mistral",
-		Headers:    map[string]string{"Authorization": "Bearer " + p.apiKey, "Content-Type": "application/json"},
+		HTTPClient:    p.httpClient,
+		URL:           p.baseURL + "/v1/chat/completions",
+		Provider:      p.name,
+		Label:         "mistral",
+		Headers:       map[string]string{"Authorization": "Bearer " + p.apiKey, "Content-Type": "application/json"},
+		BodyTransform: mistralChatTransform,
 	}, req)
 }
