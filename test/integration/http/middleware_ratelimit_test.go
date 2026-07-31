@@ -5,6 +5,7 @@ package http_test
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -48,6 +49,34 @@ func TestMiddlewareRateLimit_ExceedLimit_Returns429(t *testing.T) {
 		t.Fatalf("expected at least one 429 response, got %d OK and %d 429", count200.Load(), count429.Load())
 	}
 	t.Logf("rate limit results: %d OK, %d 429", count200.Load(), count429.Load())
+}
+
+func TestMiddlewareRateLimit_UsesXRealIPFromRouterRealIP(t *testing.T) {
+	// The full router must keep chi's RealIP middleware before the rate limiter:
+	// X-Real-IP clients behind the same trusted proxy should get independent
+	// buckets even though their socket RemoteAddr is identical.
+	env := newTestServer(t, withRateLimit(1, 1))
+	handler := env.Server.Config.Handler
+
+	requestFrom := func(clientIP string) int {
+		req := httptest.NewRequest(http.MethodGet, "/health", nil)
+		req.RemoteAddr = "10.0.0.10:12345"
+		req.Header.Set("X-Real-IP", clientIP)
+
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	if got := requestFrom("203.0.113.10"); got != http.StatusOK {
+		t.Fatalf("first request from client A: got %d, want 200", got)
+	}
+	if got := requestFrom("203.0.113.10"); got != http.StatusTooManyRequests {
+		t.Fatalf("second request from client A: got %d, want 429", got)
+	}
+	if got := requestFrom("203.0.113.11"); got != http.StatusOK {
+		t.Fatalf("first request from client B behind same proxy: got %d, want 200", got)
+	}
 }
 
 func TestMiddlewareRateLimit_NotEnabled_NoRejection(t *testing.T) {
